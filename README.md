@@ -190,3 +190,187 @@ df = pd.read_csv('../../dataset_aritmia_NEW.csv')
 - scikit-learn
 - pandas, numpy, matplotlib
 - XGBoost (optional, for v4)
+
+---
+
+## Training Pipeline and Deployment
+
+This repository includes a complete, reproducible pipeline for training and deployment, with a focus on:
+1. **Misalignment-robust training** for the v2 CNN teacher model
+2. **Knowledge distillation** into a tiny student model suitable for low-end deployment
+3. **Streaming segmentation pipeline** for real-time beat detection and classification
+
+### Directory Structure
+
+```
+code/
+├── data/                    # Data preprocessing utilities
+│   ├── __init__.py
+│   └── preprocessing.py     # Beat segmentation, normalization, patient-wise splits
+├── training/                # Training scripts
+│   ├── __init__.py
+│   ├── train_teacher_v2_robust.py    # Robust teacher training with augmentations
+│   └── train_student_distill.py      # Knowledge distillation for tiny student
+├── eval/                    # Evaluation scripts
+│   ├── __init__.py
+│   └── evaluate_robustness.py        # Robustness curves and metrics
+├── deployment/              # Deployment utilities
+│   ├── deploy.py            # Streaming ECG pipeline
+│   └── export_tflite.py     # TFLite INT8 conversion
+├── deploy/                  # Legacy deployment script
+│   └── deployment.py
+└── v0-v5/                   # Original model notebooks
+outputs/
+├── models/                  # Saved model files
+└── plots/                   # Generated plots and metrics
+```
+
+### Data Preprocessing
+
+The preprocessing module (`code/data/preprocessing.py`) provides:
+
+- **RR-adaptive windowing**: pre_frac=0.35, post_frac=0.65 with clamps:
+  - Pre: 0.08–0.35s
+  - Post: 0.16–0.60s
+- **Resampling** to 188 samples
+- **Normalization**: baseline_shift_scale (baseline ~950, scale=100)
+- **Patient-wise splits** to prevent data leakage
+- Support for CSV and PhysioNet/MIT-BIH records
+
+```python
+from code.data import ECGDataLoader, load_csv_data, patient_wise_split
+
+# Load pre-segmented beats
+loader = ECGDataLoader(normalize=True, norm_mode="baseline_shift_scale")
+X, y = loader.load_csv_beats(["ecg.csv", "ecg3.csv"])
+
+# Prepare for training
+data = loader.prepare_for_training(X, y, test_size=0.2, val_size=0.1)
+```
+
+### Training the Robust Teacher Model
+
+Train the v2 CNN with misalignment-robust augmentations:
+
+```bash
+python code/training/train_teacher_v2_robust.py \
+    --data_path ecg.csv \
+    --data_path2 ecg3.csv \
+    --output_dir outputs/models \
+    --epochs 200 \
+    --batch_size 32 \
+    --consistency_weight 0.1
+```
+
+**Augmentations applied:**
+- Random temporal shift (±10–40 ms)
+- Mild time-warp (95–105%)
+- Small amplitude scaling (95–105%) and noise
+
+**Output:**
+- `outputs/models/teacher_v2_robust.h5` - Trained model
+- `outputs/plots/robustness_curve_teacher.png` - Performance vs shift
+- `outputs/plots/robustness_metrics_teacher.csv` - Metrics table
+
+### Training the Distilled Student Model
+
+Train a compact student model (~<100k params) using knowledge distillation:
+
+```bash
+python code/training/train_student_distill.py \
+    --teacher_path outputs/models/teacher_v2_robust.h5 \
+    --data_path ecg.csv \
+    --output_dir outputs/models \
+    --temperature 3.0 \
+    --alpha 0.7 \
+    --use_consistency
+```
+
+**Student architecture:**
+- Depthwise separable convolutions (3-4 blocks)
+- BatchNorm + ReLU
+- GlobalAvgPool
+- Small dense head (~40k params)
+
+**Distillation loss:**
+- KL divergence to teacher's soft outputs (temperature T=3)
+- Cross-entropy with hard labels
+- Weight: α=0.7 (distillation) / 0.3 (hard labels)
+
+**Output:**
+- `outputs/models/student_distilled.h5` - Distilled student
+- `outputs/models/baseline_tiny.h5` - Non-distilled baseline
+- `outputs/plots/model_comparison.csv` - F1, AUC, accuracy, params, speed
+- `outputs/plots/robustness_comparison.png` - Teacher vs Student vs Baseline
+
+### Streaming Deployment
+
+Run the deployment pipeline on continuous ECG recordings:
+
+```bash
+python code/deployment/deploy.py \
+    --input_csv long_recording.csv \
+    --keras_h5 outputs/models/student_distilled.h5 \
+    --output_csv outputs/per_beat_predictions.csv \
+    --plots_dir outputs/plots \
+    --fs 360
+```
+
+**Features:**
+- Pan–Tompkins-like R-peak detection with adaptive thresholding
+- Refractory period and search-back
+- RR-adaptive beat segmentation
+- Resampling to 188 samples
+- Per-beat classification
+
+**Output:**
+- `outputs/per_beat_predictions.csv` - Timestamps, window bounds, prob, label
+- `outputs/plots/continuous_with_beats.png` - Signal with R-peaks and windows
+- `outputs/plots/beats_grid.png` - Grid of beats with predictions
+
+### Robustness Evaluation
+
+Generate robustness curves and comparison tables:
+
+```bash
+python code/eval/evaluate_robustness.py \
+    --model_path outputs/models/teacher_v2_robust.h5,outputs/models/student_distilled.h5 \
+    --model_names "Teacher,Student" \
+    --data_path ecg.csv \
+    --output_dir outputs/plots
+```
+
+**Output:**
+- Robustness curves (accuracy/AUC/F1 vs temporal shift)
+- Confusion matrices at different shifts
+- ROC curves
+- Model comparison table
+
+### TFLite INT8 Export (Optional)
+
+Convert models to TFLite for edge deployment:
+
+```bash
+python code/deployment/export_tflite.py \
+    --model_path outputs/models/student_distilled.h5 \
+    --data_path ecg.csv \
+    --quantize int8 \
+    --compare
+```
+
+**Output:**
+- `outputs/models/student_distilled_int8.tflite` - Quantized model
+- Size and latency comparison with original Keras model
+
+### Expected Results
+
+| Metric | Teacher | Student (Distilled) | Baseline (Tiny) |
+|--------|---------|---------------------|-----------------|
+| Parameters | ~500k | ~40k | ~40k |
+| Accuracy (0ms) | ~0.98 | ~0.97 | ~0.95 |
+| AUC | ~0.99 | ~0.98 | ~0.96 |
+| F1 (Abnormal) | ~0.97 | ~0.96 | ~0.93 |
+| Inference Time | ~10ms | ~3ms | ~3ms |
+| Max Acc Drop (±40ms) | ~2% | ~3% | ~5% |
+
+The distilled student achieves comparable performance to the teacher while being significantly smaller and faster, with better robustness than a non-distilled baseline.
