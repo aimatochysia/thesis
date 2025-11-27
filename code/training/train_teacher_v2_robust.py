@@ -136,8 +136,11 @@ class TemporalShiftAugmentation:
         # Convert ms to samples
         self.min_shift_samples = int(shift_range_ms[0] * fs / 1000)
         self.max_shift_samples = int(shift_range_ms[1] * fs / 1000)
-        # Scale for 188-sample beat
-        scale = input_len / (fs * 0.8)  # Assume ~0.8s beat
+        # Scale for 188-sample beat. Assumes typical beat duration of ~0.8s at fs=360
+        # This scaling factor converts physical shift (ms) to sample shift in the 188-sample input
+        # For different beat durations, adjust the assumed_beat_duration_sec parameter
+        assumed_beat_duration_sec = 0.8  # Typical RR interval ~800ms
+        scale = input_len / (fs * assumed_beat_duration_sec)
         self.min_shift_scaled = max(1, int(self.min_shift_samples * scale))
         self.max_shift_scaled = max(2, int(self.max_shift_samples * scale))
 
@@ -712,11 +715,13 @@ def main():
     # Handle multiple data paths
     data_path = args.data_path
     if args.data_path2:
+        import tempfile
         # Combine datasets
         df1 = pd.read_csv(args.data_path, header=None)
         df2 = pd.read_csv(args.data_path2, header=None)
         combined = pd.concat([df1, df2], ignore_index=True)
-        temp_path = "/tmp/combined_ecg_data.csv"
+        # Use tempfile for cross-platform compatibility
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.csv', prefix='combined_ecg_data_')
         combined.to_csv(temp_path, index=False, header=False)
         data_path = temp_path
 

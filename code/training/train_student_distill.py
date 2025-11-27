@@ -234,8 +234,7 @@ class StudentTrainer:
             Tuple of (loss, accuracy)
         """
         # Get teacher predictions (no gradient)
-        with tf.stop_gradient():
-            teacher_preds = self.teacher(X_batch, training=False)
+        teacher_preds = tf.stop_gradient(self.teacher(X_batch, training=False))
 
         # Forward pass and compute loss
         with tf.GradientTape() as tape:
@@ -791,10 +790,12 @@ def main():
     # Handle multiple data paths
     data_path = args.data_path
     if args.data_path2:
+        import tempfile
         df1 = pd.read_csv(args.data_path, header=None)
         df2 = pd.read_csv(args.data_path2, header=None)
         combined = pd.concat([df1, df2], ignore_index=True)
-        temp_path = "/tmp/combined_ecg_data.csv"
+        # Use tempfile for cross-platform compatibility
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.csv', prefix='combined_ecg_data_')
         combined.to_csv(temp_path, index=False, header=False)
         data_path = temp_path
 

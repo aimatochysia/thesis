@@ -250,12 +250,14 @@ def preprocess_stream(signal: np.ndarray, fs: int, bp_low: float, bp_high: float
     Apply bandpass and optional notch filtering to the entire signal (offline convenience).
     For true streaming, you'd implement causal steps; this function is okay for offline replay.
     """
+    from scipy.signal import lfilter
+    
     sos = butter_bandpass_sos(bp_low, bp_high, fs, order=2)
     filtered = sosfilt(sos, signal)
 
     if use_notch:
         b, a = notch_sos(notch_freq, notch_q, fs)
-        filtered = sosfilt(np.array([b, a], dtype=object), filtered)  # fallback; or use lfilter(b,a,filtered)
+        filtered = lfilter(b, a, filtered)
 
     return filtered
 

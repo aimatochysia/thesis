@@ -104,7 +104,9 @@ def convert_to_tflite(
     tflite_model = converter.convert()
 
     # Save
-    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     with open(output_path, 'wb') as f:
         f.write(tflite_model)
 
