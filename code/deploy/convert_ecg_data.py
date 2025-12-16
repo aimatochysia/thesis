@@ -134,13 +134,13 @@ def main():
     print("\n" + "=" * 60)
     print("Conversion Summary")
     print("=" * 60)
-    print(f"MLII Signal:")
+    print("MLII Signal:")
     print(f"  - Total samples: {len(mlii_df)}")
     print(f"  - Min value: {mlii_df['MLII'].min()}")
     print(f"  - Max value: {mlii_df['MLII'].max()}")
     print(f"  - Mean value: {mlii_df['MLII'].mean():.2f}")
     
-    print(f"\nAnnotations:")
+    print("\nAnnotations:")
     print(f"  - Total beats: {len(annotations_df)}")
     beat_type_counts = annotations_df['beat_type'].value_counts()
     for beat_type, count in beat_type_counts.items():

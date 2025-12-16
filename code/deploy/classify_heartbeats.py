@@ -40,6 +40,13 @@ except ImportError:
 
 
 # Constants
+# Beat Segmentation Configuration:
+# - BEAT_LENGTH: Total samples per beat (must match model input)
+# - PRE_SAMPLES: Samples before R-peak
+# - POST_SAMPLES: Samples after R-peak
+# These values are designed to capture a complete heartbeat cycle
+# with the R-peak positioned to allow capturing both P-wave and T-wave.
+# Total = PRE_SAMPLES + POST_SAMPLES = 188 (matches model's input shape)
 BEAT_LENGTH = 188  # Required beat length for the model
 PRE_SAMPLES = 70   # Samples before R-peak
 POST_SAMPLES = 118 # Samples after R-peak (total = 70 + 118 = 188)
@@ -157,14 +164,21 @@ def classify_beat(model, normalized_beat: np.ndarray) -> tuple:
     # Get prediction probabilities
     proba = model.predict(beat_input, verbose=0)
     
-    # For binary classification with softmax output
+    # Validate output shape for binary classification
+    if proba.ndim != 2 or proba.shape[0] != 1:
+        raise ValueError(f"Unexpected model output shape: {proba.shape}. Expected (1, n_classes).")
+    
+    # For binary classification with 2-class softmax output
     if proba.shape[1] == 2:
         prob_abnormal = float(proba[0, 1])
         predicted_class = 1 if prob_abnormal >= 0.5 else 0
-    else:
+    elif proba.shape[1] == 1:
         # Single output with sigmoid
         prob_abnormal = float(proba[0, 0])
         predicted_class = 1 if prob_abnormal >= 0.5 else 0
+    else:
+        raise ValueError(f"Unexpected model output shape: {proba.shape}. "
+                         f"Expected 1 or 2 output units for binary classification.")
     
     return predicted_class, prob_abnormal
 
@@ -350,11 +364,18 @@ def main():
     if missing_files:
         # Try to create the signal and annotation files first
         if not os.path.exists(signal_path) or not os.path.exists(annotations_path):
-            print("Signal/Annotation files not found. Running data conversion first...")
-            # Import and run conversion
-            from convert_ecg_data import main as convert_main
-            convert_main()
+            print("Signal/Annotation files not found.")
+            print("Please run the data conversion script first:")
+            print("  python convert_ecg_data.py")
             print()
+            print("Attempting to run conversion automatically...")
+            try:
+                from convert_ecg_data import main as convert_main
+                convert_main()
+                print()
+            except ImportError as e:
+                print(f"Error: Could not import convert_ecg_data: {e}")
+                sys.exit(1)
     
     # Re-check for model and scaler
     if not os.path.exists(model_path):
