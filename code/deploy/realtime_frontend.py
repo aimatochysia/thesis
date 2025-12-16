@@ -5,38 +5,56 @@ A mini web-based frontend that simulates real-time ECG monitoring and classifica
 Features:
 - Real-time ECG signal visualization
 - Automatic heartbeat detection at R-peaks
-- AI model classification while time continues in background
+- AI model classification using PyTorch ONNX models (v2/v3/v5)
 - Live classification results display
 
 Usage:
-    python realtime_frontend.py
+    python realtime_frontend.py              # Uses v3 (LSTM) by default
+    python realtime_frontend.py --model v2   # Use CNN model
+    python realtime_frontend.py --model v3   # Use LSTM model
+    python realtime_frontend.py --model v5   # Use Transformer model
+    
     Then open http://localhost:5000 in your browser
 """
 
 import os
 import sys
+import argparse
 import numpy as np
 import pandas as pd
 import joblib
 from flask import Flask, render_template_string, jsonify, request
 
-# ONNX Runtime import for cross-platform inference without Keras dependency
+# ONNX Runtime import for cross-platform inference (PyTorch models exported to ONNX)
 try:
     import onnxruntime as ort
     USE_ONNX = True
 except ImportError:
-    print("Warning: ONNXRuntime not found. Falling back to TensorFlow/Keras.")
-    print("Install ONNXRuntime for better cross-platform support: pip install onnxruntime")
-    try:
-        import tensorflow as tf
-        from tensorflow.keras.models import load_model
-        USE_ONNX = False
-    except ImportError:
-        print("Error: Neither ONNXRuntime nor TensorFlow is available.")
-        print("Install one of them:")
-        print("  pip install onnxruntime  (recommended, lightweight)")
-        print("  pip install tensorflow   (heavier, but works if ONNX model not available)")
-        sys.exit(1)
+    print("Error: ONNXRuntime not found.")
+    print("Install ONNXRuntime for ONNX model inference: pip install onnxruntime")
+    sys.exit(1)
+
+# Model configurations for v2, v3, v5 PyTorch ONNX models
+MODEL_CONFIGS = {
+    'v2': {
+        'name': 'CNN (v2)',
+        'onnx_file': 'ecg_cnn_v2_pytorch_final.onnx',
+        'scaler_file': 'scaler_v2_pytorch.pkl',
+        'input_shape': (1, 1, 188),  # CNN: (batch, channels, length)
+    },
+    'v3': {
+        'name': 'LSTM (v3)',
+        'onnx_file': 'ecg_lstm_v3_pytorch_final.onnx',
+        'scaler_file': 'scaler_v3_pytorch.pkl',
+        'input_shape': (1, 188, 1),  # LSTM: (batch, timesteps, features)
+    },
+    'v5': {
+        'name': 'Transformer (v5)',
+        'onnx_file': 'ecg_transformer_v5_pytorch_final.onnx',
+        'scaler_file': 'scaler_v5_pytorch.pkl',
+        'input_shape': (1, 188, 1),  # Transformer: (batch, timesteps, features)
+    },
+}
 
 # Constants
 BEAT_LENGTH = 188
@@ -52,15 +70,16 @@ ecg_data = None
 annotations = None
 model = None
 scaler = None
+model_config = None  # Current model configuration
 current_sample = 0
 classification_results = []
 is_running = False
 speed_multiplier = 10  # Speed up simulation (10x faster)
 
 
-def load_data():
+def load_data(model_version='v3'):
     """Load ECG signal, annotations, model, and scaler."""
-    global ecg_data, annotations, model, scaler
+    global ecg_data, annotations, model, scaler, model_config
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sample_dir = os.path.join(script_dir, 'sample')
@@ -92,47 +111,37 @@ def load_data():
                 continue
     annotations = pd.DataFrame(annotations_list)
     
-    # Model file paths (defined once for reuse)
-    onnx_model_path = os.path.join(sample_dir, 'ecg_lstm_final.onnx')
-    h5_model_path = os.path.join(sample_dir, 'ecg_lstm_final.h5')
-    keras_model_path = os.path.join(sample_dir, 'ecg_lstm_v3_final.keras')
+    # Get model configuration
+    if model_version not in MODEL_CONFIGS:
+        print(f"Unknown model version '{model_version}'. Using v3 (LSTM) as default.")
+        model_version = 'v3'
     
-    # Load model - try ONNX first (preferred), fallback to Keras
-    if USE_ONNX:
-        # Try to load ONNX model
-        if os.path.exists(onnx_model_path):
-            print(f"Loading ONNX model from: {onnx_model_path}")
-            model = ort.InferenceSession(onnx_model_path)
-            print("ONNX model loaded successfully (Keras-free inference)")
-        elif os.path.exists(h5_model_path):
-            print(f"ONNX model not found. To use ONNX (recommended for cross-platform):")
-            print(f"  Convert {h5_model_path} to ONNX format")
-            print("Attempting to load H5 model with TensorFlow...")
-            import tensorflow as tf
-            from tensorflow.keras.models import load_model as keras_load_model
-            model = keras_load_model(h5_model_path)
-            print("H5 model loaded with TensorFlow/Keras")
-        else:
-            raise FileNotFoundError(f"No model found. Looking for:\n  {onnx_model_path}\n  {h5_model_path}")
+    model_config = MODEL_CONFIGS[model_version]
+    print(f"\nLoading {model_config['name']} model...")
+    
+    # Load ONNX model
+    onnx_model_path = os.path.join(sample_dir, model_config['onnx_file'])
+    if os.path.exists(onnx_model_path):
+        print(f"Loading ONNX model from: {onnx_model_path}")
+        model = ort.InferenceSession(onnx_model_path)
+        print(f"✓ {model_config['name']} ONNX model loaded successfully")
     else:
-        # Use Keras model
-        if os.path.exists(keras_model_path):
-            model = load_model(keras_model_path)
-        elif os.path.exists(h5_model_path):
-            model = load_model(h5_model_path)
-        else:
-            raise FileNotFoundError(f"No Keras model found at:\n  {keras_model_path}\n  {h5_model_path}")
+        raise FileNotFoundError(f"ONNX model not found: {onnx_model_path}")
     
     # Load scaler
-    scaler_path = os.path.join(sample_dir, 'scaler_v3.pkl')
-    scaler = joblib.load(scaler_path)
+    scaler_path = os.path.join(sample_dir, model_config['scaler_file'])
+    if os.path.exists(scaler_path):
+        scaler = joblib.load(scaler_path)
+        print(f"✓ Scaler loaded from: {scaler_path}")
+    else:
+        raise FileNotFoundError(f"Scaler not found: {scaler_path}")
     
-    print(f"Loaded {len(ecg_data)} ECG samples")
+    print(f"\nLoaded {len(ecg_data)} ECG samples")
     print(f"Loaded {len(annotations)} annotations")
 
 
 def extract_and_classify_beat(signal, r_peak_idx, beat_type):
-    """Extract beat at R-peak and classify it."""
+    """Extract beat at R-peak and classify it using PyTorch ONNX model."""
     start_idx = r_peak_idx - PRE_SAMPLES
     end_idx = r_peak_idx + POST_SAMPLES
     
@@ -149,23 +158,21 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     else:
         beat = signal[start_idx:end_idx].astype(np.float32)
     
-    # Normalize
+    # Normalize using the scaler (fitted only on training data)
     beat_2d = beat.reshape(1, -1)
     normalized = scaler.transform(beat_2d).flatten().astype(np.float32)
     
-    # Classify - handle both ONNX and Keras models
-    beat_input = normalized.reshape(1, BEAT_LENGTH, 1)
+    # Reshape for the specific model architecture
+    # model_config['input_shape'] contains the expected shape: (batch, ...)
+    input_shape = model_config['input_shape']
+    beat_input = normalized.reshape(input_shape)
     
-    # Check if model is an ONNX Runtime session (using hasattr to avoid NameError)
-    if USE_ONNX and hasattr(model, 'run') and hasattr(model, 'get_inputs'):
-        # ONNX model inference
-        input_name = model.get_inputs()[0].name
-        output_name = model.get_outputs()[0].name
-        proba = model.run([output_name], {input_name: beat_input})[0]
-    else:
-        # Keras model inference
-        proba = model.predict(beat_input, verbose=0)
+    # ONNX model inference
+    input_name = model.get_inputs()[0].name
+    output_name = model.get_outputs()[0].name
+    proba = model.run([output_name], {input_name: beat_input})[0]
     
+    # Handle output - PyTorch models output 2-class probabilities
     if proba.shape[1] == 2:
         prob_abnormal = float(proba[0, 1])
     else:
@@ -409,11 +416,22 @@ HTML_TEMPLATE = '''
         #speedSlider {
             width: 100px;
         }
+        .model-badge {
+            background: linear-gradient(45deg, #00ff88, #00cc6a);
+            color: #1a1a2e;
+            padding: 5px 15px;
+            border-radius: 15px;
+            font-size: 14px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🫀 ECG Real-Time Classification Monitor</h1>
+        <p style="text-align: center; color: #888; margin-bottom: 15px;">
+            Using PyTorch ONNX Model: <span id="modelName" class="model-badge">Loading...</span>
+        </p>
         
         <div class="controls">
             <button id="startBtn" onclick="startSimulation()">▶ Start</button>
@@ -749,7 +767,19 @@ HTML_TEMPLATE = '''
             drawECG();
         }
         
+        // Load model info
+        async function loadModelInfo() {
+            try {
+                const response = await fetch('/api/model_info');
+                const info = await response.json();
+                document.getElementById('modelName').textContent = info.name;
+            } catch (e) {
+                console.error('Failed to load model info:', e);
+            }
+        }
+        
         // Initialize
+        loadModelInfo();
         loadData().then(() => {
             drawECG();
         });
@@ -785,21 +815,41 @@ def classify():
     return jsonify(result)
 
 
+@app.route('/api/model_info')
+def get_model_info():
+    """Return current model information."""
+    return jsonify({
+        'name': model_config['name'],
+        'onnx_file': model_config['onnx_file'],
+        'scaler_file': model_config['scaler_file'],
+    })
+
+
 def main():
     """Run the real-time frontend."""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='ECG Real-Time Classification Frontend')
+    parser.add_argument('--model', '-m', type=str, default='v3', choices=['v2', 'v3', 'v5'],
+                        help='Model version to use: v2 (CNN), v3 (LSTM), v5 (Transformer). Default: v3')
+    parser.add_argument('--port', '-p', type=int, default=5000,
+                        help='Port to run the server on. Default: 5000')
+    args = parser.parse_args()
+    
     print("=" * 60)
     print("ECG Real-Time Classification Frontend")
+    print("Using PyTorch ONNX Models")
     print("=" * 60)
     
-    print("\nLoading data...")
-    load_data()
+    print(f"\nSelected model: {args.model.upper()}")
+    print("Loading data and model...")
+    load_data(model_version=args.model)
     
-    print("\nStarting web server...")
-    print("Open your browser and go to: http://localhost:5000")
+    print(f"\nStarting web server on port {args.port}...")
+    print(f"Open your browser and go to: http://localhost:{args.port}")
     print("\nPress Ctrl+C to stop the server")
     print("=" * 60)
     
-    app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
+    app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
 
 
 if __name__ == '__main__':
