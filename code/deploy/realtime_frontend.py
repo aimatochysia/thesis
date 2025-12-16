@@ -20,13 +20,23 @@ import pandas as pd
 import joblib
 from flask import Flask, render_template_string, jsonify, request
 
-# TensorFlow import with error handling
+# ONNX Runtime import for cross-platform inference without Keras dependency
 try:
-    import tensorflow as tf
-    from tensorflow.keras.models import load_model
+    import onnxruntime as ort
+    USE_ONNX = True
 except ImportError:
-    print("Error: TensorFlow is required. Install with: pip install tensorflow")
-    sys.exit(1)
+    print("Warning: ONNXRuntime not found. Falling back to TensorFlow/Keras.")
+    print("Install ONNXRuntime for better cross-platform support: pip install onnxruntime")
+    try:
+        import tensorflow as tf
+        from tensorflow.keras.models import load_model
+        USE_ONNX = False
+    except ImportError:
+        print("Error: Neither ONNXRuntime nor TensorFlow is available.")
+        print("Install one of them:")
+        print("  pip install onnxruntime  (recommended, lightweight)")
+        print("  pip install tensorflow   (heavier, but works if ONNX model not available)")
+        sys.exit(1)
 
 # Constants
 BEAT_LENGTH = 188
@@ -82,9 +92,36 @@ def load_data():
                 continue
     annotations = pd.DataFrame(annotations_list)
     
-    # Load model
-    model_path = os.path.join(sample_dir, 'ecg_lstm_v3_final.keras')
-    model = load_model(model_path)
+    # Model file paths (defined once for reuse)
+    onnx_model_path = os.path.join(sample_dir, 'ecg_lstm_final.onnx')
+    h5_model_path = os.path.join(sample_dir, 'ecg_lstm_final.h5')
+    keras_model_path = os.path.join(sample_dir, 'ecg_lstm_v3_final.keras')
+    
+    # Load model - try ONNX first (preferred), fallback to Keras
+    if USE_ONNX:
+        # Try to load ONNX model
+        if os.path.exists(onnx_model_path):
+            print(f"Loading ONNX model from: {onnx_model_path}")
+            model = ort.InferenceSession(onnx_model_path)
+            print("ONNX model loaded successfully (Keras-free inference)")
+        elif os.path.exists(h5_model_path):
+            print(f"ONNX model not found. To use ONNX (recommended for cross-platform):")
+            print(f"  Convert {h5_model_path} to ONNX format")
+            print("Attempting to load H5 model with TensorFlow...")
+            import tensorflow as tf
+            from tensorflow.keras.models import load_model as keras_load_model
+            model = keras_load_model(h5_model_path)
+            print("H5 model loaded with TensorFlow/Keras")
+        else:
+            raise FileNotFoundError(f"No model found. Looking for:\n  {onnx_model_path}\n  {h5_model_path}")
+    else:
+        # Use Keras model
+        if os.path.exists(keras_model_path):
+            model = load_model(keras_model_path)
+        elif os.path.exists(h5_model_path):
+            model = load_model(h5_model_path)
+        else:
+            raise FileNotFoundError(f"No Keras model found at:\n  {keras_model_path}\n  {h5_model_path}")
     
     # Load scaler
     scaler_path = os.path.join(sample_dir, 'scaler_v3.pkl')
@@ -116,9 +153,18 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     beat_2d = beat.reshape(1, -1)
     normalized = scaler.transform(beat_2d).flatten().astype(np.float32)
     
-    # Classify
+    # Classify - handle both ONNX and Keras models
     beat_input = normalized.reshape(1, BEAT_LENGTH, 1)
-    proba = model.predict(beat_input, verbose=0)
+    
+    # Check if model is an ONNX Runtime session (using hasattr to avoid NameError)
+    if USE_ONNX and hasattr(model, 'run') and hasattr(model, 'get_inputs'):
+        # ONNX model inference
+        input_name = model.get_inputs()[0].name
+        output_name = model.get_outputs()[0].name
+        proba = model.run([output_name], {input_name: beat_input})[0]
+    else:
+        # Keras model inference
+        proba = model.predict(beat_input, verbose=0)
     
     if proba.shape[1] == 2:
         prob_abnormal = float(proba[0, 1])
