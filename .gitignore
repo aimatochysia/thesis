@@ -1,1 +1,16 @@
 ~$e*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+
+# Generated data files (build artifacts)
+code/deploy/sample/mlii_signal.csv
+code/deploy/sample/parsed_annotations.csv
+code/deploy/sample/classification_results.csv
+
+# Output directories
+outputs/
