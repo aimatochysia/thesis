@@ -1,1 +1,9 @@
 ~$e*
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Output files
+code/deploy/outputs/
