@@ -15,13 +15,10 @@ Usage:
 
 import os
 import sys
-import json
-import time
-import threading
 import numpy as np
 import pandas as pd
 import joblib
-from flask import Flask, render_template_string, jsonify, Response
+from flask import Flask, render_template_string, jsonify, request
 
 # TensorFlow import with error handling
 try:
@@ -734,7 +731,6 @@ def get_data():
 @app.route('/api/classify', methods=['POST'])
 def classify():
     """Classify a single beat."""
-    from flask import request
     data = request.json
     r_peak = data['r_peak']
     beat_type = data['beat_type']
@@ -757,7 +753,7 @@ def main():
     print("\nPress Ctrl+C to stop the server")
     print("=" * 60)
     
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
 
 
 if __name__ == '__main__':
