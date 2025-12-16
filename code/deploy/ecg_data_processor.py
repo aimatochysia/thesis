@@ -320,8 +320,8 @@ def generate_and_process_records(num_records: int = DEFAULT_NUM_RECORDS,
     duration_sec = duration_minutes * 60
     all_dfs = []
     
-    # MIT-BIH record numbers (using some common ones for naming)
-    record_ids = [100, 101, 102, 103, 104][:num_records]
+    # MIT-BIH record numbers - generate dynamically based on num_records
+    record_ids = list(range(100, 100 + num_records))
     
     for i, record_id in enumerate(record_ids):
         print(f"Processing record {record_id} ({i+1}/{num_records})...")

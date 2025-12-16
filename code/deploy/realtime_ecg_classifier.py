@@ -62,6 +62,21 @@ CONFIG = {
     "sklearn_pkl_path": None,
 }
 
+# ECG waveform amplitude constants for synthetic signal generation
+ECG_WAVEFORM = {
+    "baseline": 950,           # Baseline amplitude
+    "p_wave_amp": 15,          # P-wave amplitude
+    "q_wave_amp": 20,          # Q-wave amplitude (negative deflection)
+    "r_peak_normal_amp": 250,  # Normal R-peak amplitude
+    "r_peak_abnormal_min": 150,  # Abnormal R-peak minimum
+    "r_peak_abnormal_max": 350,  # Abnormal R-peak maximum
+    "s_wave_amp": 40,          # S-wave amplitude (negative deflection)
+    "t_wave_normal_amp": 30,   # Normal T-wave amplitude
+    "t_wave_abnormal_min": 10, # Abnormal T-wave minimum
+    "t_wave_abnormal_max": 50, # Abnormal T-wave maximum
+    "noise_std": 2,            # Standard deviation of noise
+}
+
 
 # ========== Signal Processing Functions ==========
 
@@ -344,8 +359,11 @@ class HeartbeatClassifier:
             abnormality_score = (beat_std - 0.5) / 0.3  # Normalized score
             prob = 1 / (1 + np.exp(-abnormality_score))  # Sigmoid
             
-            # Add some randomness for demonstration
-            prob = min(1.0, max(0.0, prob + np.random.uniform(-0.1, 0.1)))
+            # Add some small variance for demonstration (deterministic based on beat properties)
+            # Use beat hash for reproducibility instead of random noise
+            beat_hash = hash(tuple(beat_normalized[:10].astype(int))) % 100
+            variance = (beat_hash - 50) / 500  # Small deterministic variance
+            prob = min(1.0, max(0.0, prob + variance))
             label = int(prob >= 0.5)
             
             return label, prob
@@ -464,7 +482,6 @@ class RealtimeECGPipeline:
     def _print_result(self, result: Dict):
         """Print a classification result."""
         symbol = "✓" if result["pred_label"] == 0 else "✗"
-        color_start = "" if result["pred_label"] == 0 else ""
         
         print(f"Beat #{result['beat_index']:4d} | "
               f"Time: {result['timestamp_sec']:8.2f}s | "
@@ -495,13 +512,11 @@ def generate_synthetic_ecg(duration_sec: int, fs: int, heart_rate_bpm: float = 7
     Generate synthetic ECG signal for testing.
     """
     num_samples = int(duration_sec * fs)
-    t = np.arange(num_samples) / fs
     
     beat_interval = 60.0 / heart_rate_bpm
     rr_variability = 0.05
     
     ecg = np.zeros(num_samples)
-    baseline = 950
     
     current_time = 0.5
     while current_time < duration_sec - 1:
@@ -515,7 +530,11 @@ def generate_synthetic_ecg(duration_sec: int, fs: int, heart_rate_bpm: float = 7
         is_abnormal = np.random.random() < abnormality_rate
         
         # R-peak amplitude (abnormal might have different amplitude)
-        r_amplitude = 250 if not is_abnormal else np.random.choice([150, 350])
+        if not is_abnormal:
+            r_amplitude = ECG_WAVEFORM["r_peak_normal_amp"]
+        else:
+            r_amplitude = np.random.choice([ECG_WAVEFORM["r_peak_abnormal_min"], 
+                                            ECG_WAVEFORM["r_peak_abnormal_max"]])
         
         # P-wave
         p_start = max(0, r_idx - int(0.2 * fs))
@@ -524,7 +543,7 @@ def generate_synthetic_ecg(duration_sec: int, fs: int, heart_rate_bpm: float = 7
             offset = i - p_start
             width = p_end - p_start
             if width > 0:
-                ecg[i] += 15 * np.sin(np.pi * offset / width)
+                ecg[i] += ECG_WAVEFORM["p_wave_amp"] * np.sin(np.pi * offset / width)
         
         # Q-wave
         q_start = max(0, r_idx - int(0.04 * fs))
@@ -532,7 +551,7 @@ def generate_synthetic_ecg(duration_sec: int, fs: int, heart_rate_bpm: float = 7
             offset = i - q_start
             width = r_idx - q_start
             if width > 0:
-                ecg[i] -= 20 * (offset / width)
+                ecg[i] -= ECG_WAVEFORM["q_wave_amp"] * (offset / width)
         
         # R-peak
         if r_idx < num_samples:
@@ -544,12 +563,16 @@ def generate_synthetic_ecg(duration_sec: int, fs: int, heart_rate_bpm: float = 7
             offset = i - r_idx
             width = s_end - r_idx
             if width > 0:
-                ecg[i] -= 40 * (1 - offset / width)
+                ecg[i] -= ECG_WAVEFORM["s_wave_amp"] * (1 - offset / width)
         
         # T-wave
         t_start = r_idx + int(0.1 * fs)
         t_end = min(num_samples, r_idx + int(0.35 * fs))
-        t_amplitude = 30 if not is_abnormal else np.random.choice([10, 50])
+        if not is_abnormal:
+            t_amplitude = ECG_WAVEFORM["t_wave_normal_amp"]
+        else:
+            t_amplitude = np.random.choice([ECG_WAVEFORM["t_wave_abnormal_min"],
+                                            ECG_WAVEFORM["t_wave_abnormal_max"]])
         for i in range(t_start, t_end):
             offset = i - t_start
             width = t_end - t_start
@@ -558,8 +581,8 @@ def generate_synthetic_ecg(duration_sec: int, fs: int, heart_rate_bpm: float = 7
         
         current_time += current_rr
     
-    ecg += baseline
-    ecg += np.random.normal(0, 2, num_samples)
+    ecg += ECG_WAVEFORM["baseline"]
+    ecg += np.random.normal(0, ECG_WAVEFORM["noise_std"], num_samples)
     
     return ecg
 
