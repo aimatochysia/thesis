@@ -34,7 +34,7 @@ def main():
     # Convert to ONNX using command line
     print(f"\nConverting to ONNX...")
     cmd = [
-        'python3', '-m', 'tf2onnx.convert',
+        sys.executable, '-m', 'tf2onnx.convert',
         '--saved-model', saved_model_dir,
         '--output', onnx_path,
         '--opset', '13'

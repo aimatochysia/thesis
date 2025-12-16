@@ -92,12 +92,14 @@ def load_data():
                 continue
     annotations = pd.DataFrame(annotations_list)
     
+    # Model file paths (defined once for reuse)
+    onnx_model_path = os.path.join(sample_dir, 'ecg_lstm_final.onnx')
+    h5_model_path = os.path.join(sample_dir, 'ecg_lstm_final.h5')
+    keras_model_path = os.path.join(sample_dir, 'ecg_lstm_v3_final.keras')
+    
     # Load model - try ONNX first (preferred), fallback to Keras
     if USE_ONNX:
         # Try to load ONNX model
-        onnx_model_path = os.path.join(sample_dir, 'ecg_lstm_final.onnx')
-        h5_model_path = os.path.join(sample_dir, 'ecg_lstm_final.h5')
-        
         if os.path.exists(onnx_model_path):
             print(f"Loading ONNX model from: {onnx_model_path}")
             model = ort.InferenceSession(onnx_model_path)
@@ -114,9 +116,6 @@ def load_data():
             raise FileNotFoundError(f"No model found. Looking for:\n  {onnx_model_path}\n  {h5_model_path}")
     else:
         # Use Keras model
-        keras_model_path = os.path.join(sample_dir, 'ecg_lstm_v3_final.keras')
-        h5_model_path = os.path.join(sample_dir, 'ecg_lstm_final.h5')
-        
         if os.path.exists(keras_model_path):
             model = load_model(keras_model_path)
         elif os.path.exists(h5_model_path):
@@ -157,7 +156,8 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     # Classify - handle both ONNX and Keras models
     beat_input = normalized.reshape(1, BEAT_LENGTH, 1)
     
-    if isinstance(model, ort.InferenceSession):
+    # Check if model is an ONNX Runtime session (using hasattr to avoid NameError)
+    if USE_ONNX and hasattr(model, 'run') and hasattr(model, 'get_inputs'):
         # ONNX model inference
         input_name = model.get_inputs()[0].name
         output_name = model.get_outputs()[0].name

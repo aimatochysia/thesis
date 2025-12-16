@@ -1,13 +1,22 @@
 """
 Convert Keras LSTM model to ONNX using keras2onnx.
+
+NOTE: keras2onnx is deprecated and may not work with TensorFlow 2.16+.
+This script is provided for reference only. Use convert_to_onnx_standalone.py instead.
 """
 
 import os
 import sys
 import numpy as np
-import tensorflow as tf
-import keras2onnx
-import onnx
+
+try:
+    import tensorflow as tf
+    import keras2onnx
+    import onnx
+except ImportError as e:
+    print(f"Error: Required package not available: {e}")
+    print("Note: keras2onnx is deprecated. Use convert_to_onnx_standalone.py instead.")
+    sys.exit(1)
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
