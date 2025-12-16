@@ -401,10 +401,25 @@ class BeatClassifier:
             self.scaler = joblib.load(scaler_path)
             print(f"Loaded scaler from: {scaler_path}")
 
-    def predict_proba(self, beat_188: np.ndarray) -> float:
+    def preprocess_beat(self, beat_188: np.ndarray) -> np.ndarray:
+        """
+        Apply scaler transformation if available.
+        """
+        if self.scaler is not None:
+            # Use the scaler fitted on training data
+            beat_2d = beat_188.reshape(1, -1)
+            return self.scaler.transform(beat_2d).flatten().astype(np.float32)
+        return beat_188.astype(np.float32)
+
+    def predict_proba(self, beat_188: np.ndarray, use_scaler: bool = True) -> float:
         """
         Returns probability of abnormal class (1).
+        If use_scaler=True and scaler is available, applies scaler first.
         """
+        # Apply scaler if requested and available
+        if use_scaler and self.scaler is not None:
+            beat_188 = self.preprocess_beat(beat_188)
+        
         if self.model_type == "onnx":
             # Reshape according to model-specific input shape
             if self.onnx_input_shape:
@@ -564,8 +579,13 @@ def emulate_stream_and_classify(
                 eps=config["per_beat_eps"]
             )
 
-            # Predict
-            prob_abnormal = classifier.predict_proba(beat_norm)
+            # Predict - if classifier has scaler, pass raw beat; otherwise use normalized
+            if hasattr(classifier, 'scaler') and classifier.scaler is not None:
+                # Use scaler in classifier (PyTorch ONNX models)
+                prob_abnormal = classifier.predict_proba(beat_188, use_scaler=True)
+            else:
+                # Use manual normalization
+                prob_abnormal = classifier.predict_proba(beat_norm, use_scaler=False)
             label = int(prob_abnormal >= 0.5)
 
             # Store results
