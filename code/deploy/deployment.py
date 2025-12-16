@@ -758,7 +758,8 @@ def main():
 
     # Get model input shape if using ONNX
     onnx_input_shape = None
-    if args.onnx_model or args.model_version:
+    if args.onnx_model:
+        # Only set input shape when actually using an ONNX model
         model_version = args.model_version or 'v3'
         if model_version in MODEL_CONFIGS:
             onnx_input_shape = MODEL_CONFIGS[model_version]['input_shape']
