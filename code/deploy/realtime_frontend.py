@@ -61,8 +61,8 @@ BEAT_LENGTH = 188
 PRE_SAMPLES = 70
 POST_SAMPLES = 118
 SAMPLING_RATE = 360  # Hz - MIT-BIH standard sampling rate
-NORMAL_BEAT_TYPES = {'N'}
-ABNORMAL_BEAT_TYPES = {'A', 'V', 'F', 'S', 'Q', '!', 'E', 'J', 'L', 'R'}
+# Beat type classification: 'N' is Normal, anything else is Abnormal
+NORMAL_BEAT_TYPE = 'N'
 
 # Global state
 app = Flask(__name__)
@@ -158,6 +158,9 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     else:
         beat = signal[start_idx:end_idx].astype(np.float32)
     
+    # Store raw beat waveform for visualization (before normalization)
+    raw_beat = beat.copy()
+    
     # Normalize using the scaler (fitted only on training data)
     beat_2d = beat.reshape(1, -1)
     normalized = scaler.transform(beat_2d).flatten().astype(np.float32)
@@ -172,7 +175,8 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     output_name = model.get_outputs()[0].name
     proba = model.run([output_name], {input_name: beat_input})[0]
     
-    # Handle output - PyTorch models output 2-class probabilities
+    # Handle output - PyTorch models output 2-class probabilities [normal, abnormal]
+    # Output: 0 = Normal, 1 = Abnormal
     if proba.shape[1] == 2:
         prob_abnormal = float(proba[0, 1])
     else:
@@ -181,13 +185,11 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     predicted_class = 1 if prob_abnormal >= 0.5 else 0
     predicted_label = "ABNORMAL" if predicted_class == 1 else "NORMAL"
     
-    # Get ground truth
-    if beat_type in NORMAL_BEAT_TYPES:
+    # Get ground truth: 'N' is Normal, anything else is Abnormal
+    if beat_type == NORMAL_BEAT_TYPE:
         ground_truth = "NORMAL"
-    elif beat_type in ABNORMAL_BEAT_TYPES:
-        ground_truth = "ABNORMAL"
     else:
-        ground_truth = "UNKNOWN"
+        ground_truth = "ABNORMAL"
     
     return {
         'r_peak': r_peak_idx,
@@ -195,7 +197,8 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
         'ground_truth': ground_truth,
         'predicted': predicted_label,
         'probability': round(prob_abnormal, 4),
-        'correct': ground_truth == predicted_label if ground_truth != "UNKNOWN" else None
+        'correct': ground_truth == predicted_label,
+        'beat_waveform': raw_beat.tolist()  # Include raw beat for visualization
     }
 
 
@@ -472,6 +475,27 @@ HTML_TEMPLATE = '''
             <div class="time-display">Time: <span id="currentTime">0:00.000</span></div>
         </div>
         
+        <!-- Beat Snapshot Panel - Shows the current beat segment sent to ONNX model -->
+        <div class="beat-snapshot-container" style="background: rgba(0, 0, 0, 0.3); border-radius: 15px; padding: 20px; margin-bottom: 20px; border: 1px solid rgba(0, 255, 136, 0.3);">
+            <h3 style="color: #00ff88; margin-bottom: 15px; border-bottom: 1px solid rgba(0, 255, 136, 0.3); padding-bottom: 10px;">💓 Current Beat Snapshot (Input to ONNX Model)</h3>
+            <div style="display: flex; align-items: center; gap: 20px;">
+                <div style="flex: 1;">
+                    <canvas id="beatCanvas" style="width: 100%; height: 150px; background: #0a0a1a; border-radius: 10px;"></canvas>
+                </div>
+                <div style="min-width: 200px; text-align: center;">
+                    <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Beat Type (Annotation)</div>
+                    <div id="beatTypeDisplay" style="font-size: 24px; font-weight: bold; color: #00ff88;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Ground Truth</div>
+                    <div id="groundTruthDisplay" style="font-size: 18px; font-weight: bold; color: #00ff88;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Model Prediction</div>
+                    <div id="predictionDisplay" style="font-size: 18px; font-weight: bold; color: #00ff88;">--</div>
+                </div>
+            </div>
+            <div style="text-align: center; color: #666; font-size: 11px; margin-top: 10px;">
+                188 samples extracted around R-peak → Normalized with scaler → Fed to ONNX model → Output: 0=Normal, 1=Abnormal
+            </div>
+        </div>
+        
         <div class="results-container">
             <div class="panel">
                 <h3>📊 Current Classification</h3>
@@ -498,6 +522,10 @@ HTML_TEMPLATE = '''
         const canvas = document.getElementById('ecgCanvas');
         const ctx = canvas.getContext('2d');
         
+        // Beat snapshot canvas
+        const beatCanvas = document.getElementById('beatCanvas');
+        const beatCtx = beatCanvas.getContext('2d');
+        
         let ecgData = [];
         let annotations = [];
         let currentIndex = 0;
@@ -507,6 +535,7 @@ HTML_TEMPLATE = '''
         let classifications = [];
         let lastBeatTime = 0;
         let speedMultiplier = 10;
+        let currentBeatWaveform = null;
         
         const SAMPLING_RATE = 360;
         const DISPLAY_SECONDS = 5;
@@ -518,9 +547,80 @@ HTML_TEMPLATE = '''
             canvas.width = rect.width * window.devicePixelRatio;
             canvas.height = rect.height * window.devicePixelRatio;
             ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            
+            // Also resize beat canvas
+            const beatRect = beatCanvas.getBoundingClientRect();
+            beatCanvas.width = beatRect.width * window.devicePixelRatio;
+            beatCanvas.height = beatRect.height * window.devicePixelRatio;
+            beatCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            
+            // Redraw beat if available
+            if (currentBeatWaveform) {
+                drawBeatWaveform(currentBeatWaveform);
+            }
         }
         resizeCanvas();
         window.addEventListener('resize', resizeCanvas);
+        
+        // Draw beat waveform on the beat snapshot canvas
+        function drawBeatWaveform(waveform, isAbnormal = false) {
+            const width = beatCanvas.getBoundingClientRect().width;
+            const height = beatCanvas.getBoundingClientRect().height;
+            
+            // Clear canvas
+            beatCtx.fillStyle = '#0a0a1a';
+            beatCtx.fillRect(0, 0, width, height);
+            
+            // Draw grid
+            beatCtx.strokeStyle = 'rgba(0, 255, 136, 0.1)';
+            beatCtx.lineWidth = 1;
+            for (let x = 0; x < width; x += 30) {
+                beatCtx.beginPath();
+                beatCtx.moveTo(x, 0);
+                beatCtx.lineTo(x, height);
+                beatCtx.stroke();
+            }
+            for (let y = 0; y < height; y += 30) {
+                beatCtx.beginPath();
+                beatCtx.moveTo(0, y);
+                beatCtx.lineTo(width, y);
+                beatCtx.stroke();
+            }
+            
+            if (!waveform || waveform.length < 2) return;
+            
+            // Find min/max for scaling
+            const minVal = Math.min(...waveform);
+            const maxVal = Math.max(...waveform);
+            const range = maxVal - minVal || 1;
+            
+            // Draw beat waveform
+            beatCtx.strokeStyle = isAbnormal ? '#ff4757' : '#00ff88';
+            beatCtx.lineWidth = 2;
+            beatCtx.beginPath();
+            
+            for (let i = 0; i < waveform.length; i++) {
+                const x = (i / waveform.length) * width;
+                const y = height - ((waveform[i] - minVal) / range) * (height - 20) - 10;
+                
+                if (i === 0) {
+                    beatCtx.moveTo(x, y);
+                } else {
+                    beatCtx.lineTo(x, y);
+                }
+            }
+            beatCtx.stroke();
+            
+            // Draw R-peak marker (at sample 70, since PRE_SAMPLES = 70)
+            const rPeakX = (70 / waveform.length) * width;
+            beatCtx.fillStyle = '#ffcc00';
+            beatCtx.beginPath();
+            beatCtx.arc(rPeakX, 10, 5, 0, Math.PI * 2);
+            beatCtx.fill();
+            beatCtx.fillStyle = '#ffcc00';
+            beatCtx.font = '10px Arial';
+            beatCtx.fillText('R-peak', rPeakX - 15, 25);
+        }
         
         // Speed slider
         document.getElementById('speedSlider').addEventListener('input', (e) => {
@@ -675,6 +775,26 @@ HTML_TEMPLATE = '''
             document.getElementById('probText').textContent = 
                 `Abnormal Probability: ${(prob * 100).toFixed(1)}%`;
             
+            // Update beat snapshot display
+            if (result.beat_waveform) {
+                currentBeatWaveform = result.beat_waveform;
+                const isAbnormal = result.predicted === 'ABNORMAL';
+                drawBeatWaveform(result.beat_waveform, isAbnormal);
+                
+                // Update beat info displays
+                const beatTypeEl = document.getElementById('beatTypeDisplay');
+                beatTypeEl.textContent = result.beat_type;
+                beatTypeEl.style.color = result.beat_type === 'N' ? '#00ff88' : '#ff4757';
+                
+                const groundTruthEl = document.getElementById('groundTruthDisplay');
+                groundTruthEl.textContent = result.ground_truth;
+                groundTruthEl.style.color = result.ground_truth === 'NORMAL' ? '#00ff88' : '#ff4757';
+                
+                const predictionEl = document.getElementById('predictionDisplay');
+                predictionEl.textContent = result.predicted;
+                predictionEl.style.color = result.predicted === 'NORMAL' ? '#00ff88' : '#ff4757';
+            }
+            
             // Update list
             const listEl = document.getElementById('classificationList');
             if (classifications.length === 1) {
@@ -750,6 +870,7 @@ HTML_TEMPLATE = '''
             displayBuffer = [];
             classifications = [];
             lastBeatTime = 0;
+            currentBeatWaveform = null;
             
             document.getElementById('totalBeats').textContent = '0';
             document.getElementById('normalBeats').textContent = '0';
@@ -763,6 +884,20 @@ HTML_TEMPLATE = '''
             document.getElementById('classificationList').innerHTML = 
                 '<p style="color: #888; text-align: center;">No classifications yet. Start the simulation!</p>';
             document.getElementById('currentTime').textContent = '0:00.000';
+            
+            // Reset beat snapshot
+            document.getElementById('beatTypeDisplay').textContent = '--';
+            document.getElementById('beatTypeDisplay').style.color = '#00ff88';
+            document.getElementById('groundTruthDisplay').textContent = '--';
+            document.getElementById('groundTruthDisplay').style.color = '#00ff88';
+            document.getElementById('predictionDisplay').textContent = '--';
+            document.getElementById('predictionDisplay').style.color = '#00ff88';
+            
+            // Clear beat canvas
+            const width = beatCanvas.getBoundingClientRect().width;
+            const height = beatCanvas.getBoundingClientRect().height;
+            beatCtx.fillStyle = '#0a0a1a';
+            beatCtx.fillRect(0, 0, width, height);
             
             drawECG();
         }
