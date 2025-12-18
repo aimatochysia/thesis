@@ -173,14 +173,25 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     # ONNX model inference
     input_name = model.get_inputs()[0].name
     output_name = model.get_outputs()[0].name
-    proba = model.run([output_name], {input_name: beat_input})[0]
+    output = model.run([output_name], {input_name: beat_input})[0]
     
-    # Handle output - PyTorch models output 2-class probabilities [normal, abnormal]
+    # Handle output - PyTorch models may output raw logits, apply softmax if needed
     # Output: 0 = Normal, 1 = Abnormal
-    if proba.shape[1] == 2:
+    if output.shape[1] == 2:
+        # Check if output looks like logits (values outside [0,1] range)
+        if np.max(np.abs(output)) > 1.5:
+            # Apply softmax to convert logits to probabilities
+            exp_output = np.exp(output - np.max(output, axis=1, keepdims=True))
+            proba = exp_output / np.sum(exp_output, axis=1, keepdims=True)
+        else:
+            proba = output
         prob_abnormal = float(proba[0, 1])
     else:
-        prob_abnormal = float(proba[0, 0])
+        # Single output, assume sigmoid was applied
+        prob_abnormal = float(output[0, 0])
+    
+    # Clamp probability to [0, 1] range
+    prob_abnormal = max(0.0, min(1.0, prob_abnormal))
     
     predicted_class = 1 if prob_abnormal >= 0.5 else 0
     predicted_label = "ABNORMAL" if predicted_class == 1 else "NORMAL"
