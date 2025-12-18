@@ -54,6 +54,12 @@ MODEL_CONFIGS = {
         'scaler_file': 'scaler_v5_pytorch.pkl',
         'input_shape': (1, 188, 1),  # Transformer: (batch, timesteps, features)
     },
+    'v6': {
+        'name': 'Advanced CNN1D on new dataset(v6)',
+        'onnx_file': 'ecg_cnn_v6_pytorch_final.onnx',
+        'scaler_file': 'scaler_v6_pytorch.pkl',
+        'input_shape': (86472, 1, 188),   # CNN: (batch, channels, length)
+    },
 }
 
 # Constants
