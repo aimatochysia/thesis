@@ -77,27 +77,47 @@ is_running = False
 speed_multiplier = 10  # Speed up simulation (10x faster)
 
 
-def load_data(model_version='v3'):
-    """Load ECG signal, annotations, model, and scaler."""
+def load_data(model_version='v3', use_training_data=True):
+    """Load ECG signal, annotations, model, and scaler.
+    
+    Args:
+        model_version: Which model to use ('v2', 'v3', 'v5')
+        use_training_data: If True, use demo data from training set (recommended for accurate predictions).
+                          If False, use MIT-BIH 100.csv (different distribution, may give incorrect predictions).
+    """
     global ecg_data, annotations, model, scaler, model_config
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sample_dir = os.path.join(script_dir, 'sample')
     
-    # Load signal from original CSV
-    signal_path = os.path.join(sample_dir, '100.csv')
+    # Choose data source
+    if use_training_data:
+        # Use demo data created from training set - matches scaler distribution
+        signal_path = os.path.join(sample_dir, 'demo_training_signal.csv')
+        annotation_path = os.path.join(sample_dir, 'demo_training_annotations.txt')
+        if not os.path.exists(signal_path):
+            print("Warning: Training demo data not found, falling back to MIT-BIH data")
+            use_training_data = False
+    
+    if not use_training_data:
+        # Use MIT-BIH record 100 - different distribution from training
+        signal_path = os.path.join(sample_dir, '100.csv')
+        annotation_path = os.path.join(sample_dir, '100annotations.txt')
+        print("Note: Using MIT-BIH data which has different distribution than training data.")
+        print("      Model predictions may not be accurate. Use --training-data for accurate demo.")
+    
+    # Load signal
     df = pd.read_csv(signal_path)
     df.columns = df.columns.str.strip().str.strip("'")
     ecg_data = df['MLII'].values.astype(np.float32)
     
     # Load annotations
-    annotation_path = os.path.join(sample_dir, '100annotations.txt')
     annotations_list = []
     with open(annotation_path, 'r') as f:
         lines = f.readlines()
     for line in lines[1:]:
         parts = line.strip().split()
-        if len(parts) >= 4:
+        if len(parts) >= 3:
             try:
                 sample_idx = int(parts[1])
                 beat_type = parts[2]
@@ -175,11 +195,13 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     output_name = model.get_outputs()[0].name
     output = model.run([output_name], {input_name: beat_input})[0]
     
-    # Handle output - PyTorch models may output raw logits, apply softmax if needed
+    # Handle output - PyTorch models output raw logits, apply softmax
     # Output: 0 = Normal, 1 = Abnormal
     if output.shape[1] == 2:
-        # Check if output looks like logits (values outside [0,1] range)
-        if np.max(np.abs(output)) > 1.5:
+        # Check if output looks like logits (any value outside [0,1] range or values don't sum to 1)
+        needs_softmax = (np.min(output) < 0 or np.max(output) > 1 or 
+                         abs(np.sum(output[0]) - 1.0) > 0.01)
+        if needs_softmax:
             # Apply softmax to convert logits to probabilities
             exp_output = np.exp(output - np.max(output, axis=1, keepdims=True))
             proba = exp_output / np.sum(exp_output, axis=1, keepdims=True)
@@ -979,6 +1001,9 @@ def main():
                         help='Model version to use: v2 (CNN), v3 (LSTM), v5 (Transformer). Default: v3')
     parser.add_argument('--port', '-p', type=int, default=5000,
                         help='Port to run the server on. Default: 5000')
+    parser.add_argument('--mit-bih', action='store_true',
+                        help='Use MIT-BIH record 100 data instead of training data. '
+                             'Note: MIT-BIH has different distribution, predictions may be inaccurate.')
     args = parser.parse_args()
     
     print("=" * 60)
@@ -987,8 +1012,13 @@ def main():
     print("=" * 60)
     
     print(f"\nSelected model: {args.model.upper()}")
+    use_training_data = not args.mit_bih
+    if use_training_data:
+        print("Using demo data from training set (accurate predictions)")
+    else:
+        print("Using MIT-BIH data (may have distribution mismatch)")
     print("Loading data and model...")
-    load_data(model_version=args.model)
+    load_data(model_version=args.model, use_training_data=use_training_data)
     
     print(f"\nStarting web server on port {args.port}...")
     print(f"Open your browser and go to: http://localhost:{args.port}")
