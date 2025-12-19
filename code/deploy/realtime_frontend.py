@@ -65,7 +65,7 @@ MODEL_CONFIGS = {
         'name': 'Context-Aware CNN1D (v6)',
         'onnx_file': 'context_ecg_model.onnx',
         'scaler_file': 'context_ecg_scaler.pkl',
-        'input_shape': (1, 7, 200),  # Context: (batch, context_window, beat_length)
+        'input_shape': (1, 7, 200),  # (batch, channels=7_beats_as_channels, length=200)
         'beat_length': 200,
         'context_aware': True,
         'context_window_size': 7,
