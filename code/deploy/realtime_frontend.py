@@ -3,10 +3,12 @@ ECG Real-Time Classification Frontend
 
 A mini web-based frontend that simulates real-time ECG monitoring and classification.
 Features:
-- Real-time ECG signal visualization
+- Real-time ECG signal visualization with scrollable history
 - Automatic heartbeat detection at R-peaks
 - AI model classification using PyTorch ONNX models (v2/v3/v5/v6)
 - Live classification results display
+- False detection log with clickable navigation
+- Beat waveform snapshot showing exact input to ONNX model
 
 PREPROCESSING (matches training exactly):
 - v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak), single beat classification
@@ -363,6 +365,12 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     else:
         ground_truth = "ABNORMAL"
     
+    # Include R-peak position in beat waveform for accurate marker placement
+    if is_context_aware:
+        r_peak_pos_in_beat = PRE_SAMPLES_V6  # R-peak is at sample 90 for v6
+    else:
+        r_peak_pos_in_beat = PRE_SAMPLES  # R-peak is at sample 70 for v2/v3/v5
+    
     result = {
         'r_peak': r_peak_idx,
         'beat_type': center_beat_type,
@@ -370,7 +378,9 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
         'predicted': predicted_label,
         'probability': round(prob_abnormal, 4),
         'correct': ground_truth == predicted_label,
-        'beat_waveform': raw_beat.tolist()  # Include raw beat for visualization
+        'beat_waveform': raw_beat.tolist(),  # Include raw beat for visualization
+        'r_peak_pos_in_beat': r_peak_pos_in_beat,  # Position of R-peak in beat waveform
+        'beat_length': BEAT_LENGTH_V6 if is_context_aware else BEAT_LENGTH
     }
     
     if is_context_aware:
@@ -591,11 +601,27 @@ HTML_TEMPLATE = '''
         .speed-control {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 5px;
             color: #888;
+            background: rgba(0,0,0,0.3);
+            padding: 8px 12px;
+            border-radius: 20px;
         }
-        #speedSlider {
-            width: 100px;
+        .speed-btn {
+            padding: 5px 10px;
+            font-size: 12px;
+            border-radius: 10px;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #fff;
+            cursor: pointer;
+        }
+        .speed-btn.active {
+            background: rgba(0,255,136,0.3);
+            border-color: #00ff88;
+        }
+        .speed-btn:hover {
+            background: rgba(0,255,136,0.2);
         }
         .model-badge {
             background: linear-gradient(45deg, #00ff88, #00cc6a);
@@ -620,8 +646,12 @@ HTML_TEMPLATE = '''
             <button id="resetBtn" onclick="resetSimulation()">🔄 Reset</button>
             <div class="speed-control">
                 <span>Speed:</span>
-                <input type="range" id="speedSlider" min="1" max="50" value="10">
-                <span id="speedValue">10x</span>
+                <button class="speed-btn" onclick="setSpeed(0.1)">0.1x</button>
+                <button class="speed-btn" onclick="setSpeed(0.5)">0.5x</button>
+                <button class="speed-btn active" onclick="setSpeed(1)">1x</button>
+                <button class="speed-btn" onclick="setSpeed(5)">5x</button>
+                <button class="speed-btn" onclick="setSpeed(10)">10x</button>
+                <span id="speedValue">1x</span>
             </div>
         </div>
         
@@ -646,11 +676,25 @@ HTML_TEMPLATE = '''
                 <div class="stat-value" id="heartRate">--</div>
                 <div class="stat-label">BPM</div>
             </div>
+            <div class="stat-item">
+                <div class="stat-value" id="falseCount" style="color: #ffd700;">0</div>
+                <div class="stat-label">False Predictions</div>
+            </div>
         </div>
         
         <div class="ecg-container">
             <canvas id="ecgCanvas"></canvas>
-            <div class="time-display">Time: <span id="currentTime">0:00.000</span></div>
+            <div class="time-display">
+                Time: <span id="currentTime">0:00.000</span>
+                <span id="historyIndicator" style="display: none; margin-left: 15px; background: rgba(255,215,0,0.2); color: #ffd700; padding: 3px 10px; border-radius: 10px; font-size: 12px;">📜 Viewing History</span>
+            </div>
+            <div style="display: flex; justify-content: center; gap: 10px; margin-top: 10px;">
+                <button onclick="scrollHistory(-5)" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">⏪ -5s</button>
+                <button onclick="scrollHistory(-1)" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">◀ -1s</button>
+                <button id="liveBtn" onclick="goToLive()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: linear-gradient(45deg, #ffd700, #ffb700); border: none; color: #1a1a2e; font-weight: bold; cursor: pointer;">🔴 Live</button>
+                <button id="fwdBtn" onclick="scrollHistory(1)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">▶ +1s</button>
+                <button id="fwd5Btn" onclick="scrollHistory(5)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">⏩ +5s</button>
+            </div>
         </div>
         
         <!-- Beat Snapshot Panel - Shows the current beat segment sent to ONNX model -->
@@ -693,6 +737,13 @@ HTML_TEMPLATE = '''
                     <p style="color: #888; text-align: center;">No classifications yet. Start the simulation!</p>
                 </div>
             </div>
+            
+            <div class="panel" style="border-left: 4px solid #ffd700;">
+                <h3 style="color: #ffd700 !important;">⚠️ False Detections</h3>
+                <div class="classification-list" id="falseDetectionList">
+                    <p style="color: #888; text-align: center;">No false detections yet.</p>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -711,13 +762,81 @@ HTML_TEMPLATE = '''
         let animationId = null;
         let displayBuffer = [];
         let classifications = [];
-        let lastBeatTime = 0;
-        let speedMultiplier = 10;
+        let falseDetections = [];
+        let beatTimes = [];  // Store recent beat times for BPM calculation
+        let speedMultiplier = 1;  // 1x = real-time
         let currentBeatWaveform = null;
+        let currentRPeakPos = 70;  // R-peak position in beat waveform
+        let currentBeatLength = 188;  // Beat length
+        
+        // History navigation
+        let viewOffset = 0;  // 0 = live view, negative = viewing history
+        let isLive = true;
         
         const SAMPLING_RATE = 360;
         const DISPLAY_SECONDS = 5;
         const DISPLAY_SAMPLES = SAMPLING_RATE * DISPLAY_SECONDS;
+        
+        // Speed control
+        function setSpeed(speed) {
+            speedMultiplier = speed;
+            document.getElementById('speedValue').textContent = speed + 'x';
+            document.querySelectorAll('.speed-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.textContent === speed + 'x') btn.classList.add('active');
+            });
+        }
+        
+        // History navigation functions
+        function scrollHistory(seconds) {
+            if (currentIndex < DISPLAY_SAMPLES) return;
+            
+            viewOffset += seconds;
+            const maxHistory = -currentIndex / SAMPLING_RATE;
+            viewOffset = Math.max(maxHistory, Math.min(0, viewOffset));
+            
+            isLive = viewOffset >= -0.1;
+            updateHistoryUI();
+            drawECG();
+            updateTime();
+        }
+        
+        function goToLive() {
+            viewOffset = 0;
+            isLive = true;
+            updateHistoryUI();
+            drawECG();
+            updateTime();
+        }
+        
+        function navigateToTime(sampleIndex) {
+            const targetOffset = (sampleIndex - currentIndex + DISPLAY_SAMPLES/2) / SAMPLING_RATE;
+            if (targetOffset >= 0) {
+                goToLive();
+                return;
+            }
+            viewOffset = targetOffset;
+            isLive = false;
+            updateHistoryUI();
+            drawECG();
+            updateTime();
+        }
+        
+        function updateHistoryUI() {
+            const indicator = document.getElementById('historyIndicator');
+            const fwdBtn = document.getElementById('fwdBtn');
+            const fwd5Btn = document.getElementById('fwd5Btn');
+            
+            if (isLive) {
+                indicator.style.display = 'none';
+                fwdBtn.disabled = true;
+                fwd5Btn.disabled = true;
+            } else {
+                indicator.style.display = 'inline';
+                fwdBtn.disabled = false;
+                fwd5Btn.disabled = false;
+            }
+        }
         
         // Resize canvas to be pixel-perfect
         function resizeCanvas() {
@@ -789,15 +908,16 @@ HTML_TEMPLATE = '''
             }
             beatCtx.stroke();
             
-            // Draw R-peak marker (at sample 70, since PRE_SAMPLES = 70)
-            const rPeakX = (70 / waveform.length) * width;
+            // Draw R-peak marker at the correct position (varies by model: v2/v3/v5=70, v6=90)
+            const rPeakX = (currentRPeakPos / waveform.length) * width;
+            const rPeakY = height - ((waveform[Math.min(currentRPeakPos, waveform.length-1)] - minVal) / range) * (height - 20) - 10;
             beatCtx.fillStyle = '#ffcc00';
             beatCtx.beginPath();
-            beatCtx.arc(rPeakX, 10, 5, 0, Math.PI * 2);
+            beatCtx.arc(rPeakX, rPeakY, 6, 0, Math.PI * 2);
             beatCtx.fill();
             beatCtx.fillStyle = '#ffcc00';
-            beatCtx.font = '10px Arial';
-            beatCtx.fillText('R-peak', rPeakX - 15, 25);
+            beatCtx.font = '11px Arial';
+            beatCtx.fillText('R-peak', rPeakX - 18, rPeakY - 10);
         }
         
         // Speed slider
@@ -840,11 +960,21 @@ HTML_TEMPLATE = '''
                 ctx.stroke();
             }
             
-            if (displayBuffer.length < 2) return;
+            // Calculate display range based on view offset
+            let endSample = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
+            let startSample = Math.max(0, endSample - DISPLAY_SAMPLES);
+            
+            // Get display buffer from ecgData
+            let buffer = [];
+            for (let i = startSample; i < endSample && i < ecgData.length; i++) {
+                buffer.push(ecgData[i]);
+            }
+            
+            if (buffer.length < 2) return;
             
             // Find min/max for scaling
-            const minVal = Math.min(...displayBuffer);
-            const maxVal = Math.max(...displayBuffer);
+            const minVal = Math.min(...buffer);
+            const maxVal = Math.max(...buffer);
             const range = maxVal - minVal || 1;
             
             // Draw ECG line
@@ -852,9 +982,9 @@ HTML_TEMPLATE = '''
             ctx.lineWidth = 2;
             ctx.beginPath();
             
-            for (let i = 0; i < displayBuffer.length; i++) {
+            for (let i = 0; i < buffer.length; i++) {
                 const x = (i / DISPLAY_SAMPLES) * width;
-                const y = height - ((displayBuffer[i] - minVal) / range) * (height - 40) - 20;
+                const y = height - ((buffer[i] - minVal) / range) * (height - 40) - 20;
                 
                 if (i === 0) {
                     ctx.moveTo(x, y);
@@ -865,13 +995,23 @@ HTML_TEMPLATE = '''
             ctx.stroke();
             
             // Draw R-peak markers
-            const startSample = currentIndex - displayBuffer.length;
             annotations.forEach(ann => {
-                if (ann.sample_index > startSample && ann.sample_index <= currentIndex) {
+                if (ann.sample_index > startSample && ann.sample_index <= endSample) {
                     const bufferIdx = ann.sample_index - startSample;
-                    if (bufferIdx >= 0 && bufferIdx < displayBuffer.length) {
+                    if (bufferIdx >= 0 && bufferIdx < buffer.length) {
                         const x = (bufferIdx / DISPLAY_SAMPLES) * width;
-                        const y = height - ((displayBuffer[bufferIdx] - minVal) / range) * (height - 40) - 20;
+                        const y = height - ((buffer[bufferIdx] - minVal) / range) * (height - 40) - 20;
+                        
+                        // Check if this beat has a false detection
+                        const classResult = classifications.find(c => c.r_peak === ann.sample_index);
+                        if (classResult && classResult.correct === false) {
+                            // Yellow circle for false detection
+                            ctx.strokeStyle = '#ffd700';
+                            ctx.lineWidth = 3;
+                            ctx.beginPath();
+                            ctx.arc(x, y, 10, 0, Math.PI * 2);
+                            ctx.stroke();
+                        }
                         
                         // Draw marker
                         ctx.fillStyle = ann.beat_type === 'N' ? '#00ff88' : '#ff4757';
@@ -881,42 +1021,83 @@ HTML_TEMPLATE = '''
                     }
                 }
             });
+            
+            // Show "History Mode" indicator if not live
+            if (!isLive) {
+                ctx.fillStyle = 'rgba(255, 215, 0, 0.9)';
+                ctx.font = 'bold 14px Arial';
+                ctx.fillText('📜 VIEWING HISTORY', 10, 25);
+            }
         }
         
         // Update time display
         function updateTime() {
-            const seconds = currentIndex / SAMPLING_RATE;
+            let displayIndex = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
+            const seconds = displayIndex / SAMPLING_RATE;
             const minutes = Math.floor(seconds / 60);
             const secs = (seconds % 60).toFixed(3);
             document.getElementById('currentTime').textContent = 
                 `${minutes}:${secs.padStart(6, '0')}`;
         }
         
+        // Calculate BPM from recent beat intervals
+        function calculateBPM(currentBeatSample) {
+            beatTimes.push(currentBeatSample);
+            
+            // Keep only last 10 beats for smoothing
+            if (beatTimes.length > 10) {
+                beatTimes.shift();
+            }
+            
+            if (beatTimes.length < 2) return null;
+            
+            // Calculate average interval from recent beats
+            let totalInterval = 0;
+            let count = 0;
+            for (let i = 1; i < beatTimes.length; i++) {
+                const interval = (beatTimes[i] - beatTimes[i-1]) / SAMPLING_RATE;
+                // Only count reasonable intervals (30-200 BPM range)
+                if (interval > 0.3 && interval < 2.0) {
+                    totalInterval += interval;
+                    count++;
+                }
+            }
+            
+            if (count === 0) return null;
+            
+            const avgInterval = totalInterval / count;
+            return Math.round(60 / avgInterval);
+        }
+        
         // Check for beats and classify
         async function checkForBeats() {
-            const prevSample = currentIndex - speedMultiplier;
+            // Calculate samples to check based on speed
+            const samplesToCheck = Math.max(1, Math.round(speedMultiplier * (SAMPLING_RATE / 60)));
+            const prevSample = currentIndex - samplesToCheck;
             
             for (const ann of annotations) {
                 if (ann.sample_index > prevSample && ann.sample_index <= currentIndex && ann.beat_type !== '+') {
                     // Found a beat! Classify it
-                    const response = await fetch('/api/classify', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            r_peak: ann.sample_index,
-                            beat_type: ann.beat_type
-                        })
-                    });
-                    const result = await response.json();
-                    addClassification(result);
-                    
-                    // Calculate heart rate
-                    if (lastBeatTime > 0) {
-                        const beatInterval = (ann.sample_index - lastBeatTime) / SAMPLING_RATE;
-                        const bpm = Math.round(60 / beatInterval);
-                        document.getElementById('heartRate').textContent = bpm;
+                    try {
+                        const response = await fetch('/api/classify', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                r_peak: ann.sample_index,
+                                beat_type: ann.beat_type
+                            })
+                        });
+                        const result = await response.json();
+                        addClassification(result);
+                        
+                        // Calculate heart rate
+                        const bpm = calculateBPM(ann.sample_index);
+                        if (bpm !== null && bpm > 0 && bpm < 300) {
+                            document.getElementById('heartRate').textContent = bpm;
+                        }
+                    } catch (e) {
+                        console.error('Classification error:', e);
                     }
-                    lastBeatTime = ann.sample_index;
                 }
             }
         }
@@ -925,16 +1106,23 @@ HTML_TEMPLATE = '''
         function addClassification(result) {
             classifications.unshift(result);
             
+            // Track false detections
+            if (result.correct === false) {
+                falseDetections.unshift(result);
+                updateFalseDetectionList();
+            }
+            
             // Update stats
-            const total = classifications.length;
+            const total = classifications.filter(c => c.correct !== null).length;
             const normal = classifications.filter(c => c.predicted === 'NORMAL').length;
-            const abnormal = total - normal;
+            const abnormal = classifications.filter(c => c.predicted === 'ABNORMAL').length;
             const correct = classifications.filter(c => c.correct === true).length;
             const known = classifications.filter(c => c.correct !== null).length;
             
-            document.getElementById('totalBeats').textContent = total;
+            document.getElementById('totalBeats').textContent = classifications.length;
             document.getElementById('normalBeats').textContent = normal;
             document.getElementById('abnormalBeats').textContent = abnormal;
+            document.getElementById('falseCount').textContent = falseDetections.length;
             if (known > 0) {
                 document.getElementById('accuracy').textContent = 
                     Math.round((correct / known) * 100) + '%';
@@ -956,6 +1144,9 @@ HTML_TEMPLATE = '''
             // Update beat snapshot display
             if (result.beat_waveform) {
                 currentBeatWaveform = result.beat_waveform;
+                // Update R-peak position from result (v2/v3/v5=70, v6=90)
+                currentRPeakPos = result.r_peak_pos_in_beat || 70;
+                currentBeatLength = result.beat_length || 188;
                 const isAbnormal = result.predicted === 'ABNORMAL';
                 drawBeatWaveform(result.beat_waveform, isAbnormal);
                 
@@ -981,7 +1172,11 @@ HTML_TEMPLATE = '''
             
             const time = (result.r_peak / SAMPLING_RATE).toFixed(2);
             const item = document.createElement('div');
+            const incorrectClass = result.correct === false ? ' style="border: 2px solid #ffd700;"' : '';
             item.className = 'classification-item ' + result.predicted.toLowerCase();
+            if (result.correct === false) item.style.border = '2px solid #ffd700';
+            item.style.cursor = 'pointer';
+            item.onclick = () => navigateToTime(result.r_peak);
             item.innerHTML = `
                 <div class="beat-info">
                     <div>Beat Type: ${result.beat_type} → ${result.predicted}</div>
@@ -991,32 +1186,73 @@ HTML_TEMPLATE = '''
             `;
             listEl.insertBefore(item, listEl.firstChild);
             
-            // Keep only last 50 items
-            while (listEl.children.length > 50) {
+            // Keep only last 100 items
+            while (listEl.children.length > 100) {
                 listEl.removeChild(listEl.lastChild);
             }
         }
         
-        // Animation loop
-        function animate() {
-            if (!isRunning) return;
+        // Update false detection list
+        function updateFalseDetectionList() {
+            const listEl = document.getElementById('falseDetectionList');
             
-            // Advance samples based on speed
-            for (let i = 0; i < speedMultiplier; i++) {
-                if (currentIndex < ecgData.length) {
-                    displayBuffer.push(ecgData[currentIndex]);
-                    currentIndex++;
-                    
-                    // Keep buffer at display size
-                    while (displayBuffer.length > DISPLAY_SAMPLES) {
-                        displayBuffer.shift();
-                    }
-                }
+            if (falseDetections.length === 0) {
+                listEl.innerHTML = '<p style="color: #888; text-align: center;">No false detections yet.</p>';
+                return;
             }
             
-            drawECG();
-            updateTime();
-            checkForBeats();
+            listEl.innerHTML = '';
+            
+            falseDetections.slice(0, 50).forEach(result => {
+                const time = (result.r_peak / SAMPLING_RATE).toFixed(2);
+                const item = document.createElement('div');
+                item.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; margin-bottom: 6px; border-radius: 8px; background: rgba(255, 215, 0, 0.15); border-left: 3px solid #ffd700; cursor: pointer;';
+                item.onclick = () => navigateToTime(result.r_peak);
+                item.innerHTML = `
+                    <div>
+                        <span style="color: #ffd700; font-weight: bold;">${time}s</span>
+                        <span style="color: #aaa; font-size: 11px; margin-left: 8px;">Expected: ${result.ground_truth} | Got: ${result.predicted}</span>
+                    </div>
+                `;
+                item.onmouseover = () => { item.style.background = 'rgba(255, 215, 0, 0.3)'; item.style.transform = 'translateX(5px)'; };
+                item.onmouseout = () => { item.style.background = 'rgba(255, 215, 0, 0.15)'; item.style.transform = 'none'; };
+                listEl.appendChild(item);
+            });
+        }
+        
+        // Animation loop with proper timing
+        let lastFrameTime = 0;
+        const targetFPS = 60;
+        const frameInterval = 1000 / targetFPS;
+        
+        function animate(timestamp) {
+            if (!isRunning) return;
+            
+            // Calculate time delta for proper timing
+            const deltaTime = timestamp - lastFrameTime;
+            
+            if (deltaTime >= frameInterval) {
+                lastFrameTime = timestamp - (deltaTime % frameInterval);
+                
+                // Calculate samples to advance: 1x speed = 360 samples/sec = 6 samples/frame at 60fps
+                const samplesPerSecond = SAMPLING_RATE * speedMultiplier;
+                const samplesToAdvance = Math.max(1, Math.round(samplesPerSecond / targetFPS));
+                
+                // Advance samples
+                for (let i = 0; i < samplesToAdvance; i++) {
+                    if (currentIndex < ecgData.length) {
+                        currentIndex++;
+                    }
+                }
+                
+                // Update display if in live mode
+                if (isLive) {
+                    drawECG();
+                    updateTime();
+                }
+                
+                checkForBeats();
+            }
             
             if (currentIndex < ecgData.length) {
                 animationId = requestAnimationFrame(animate);
@@ -1032,7 +1268,8 @@ HTML_TEMPLATE = '''
                 await loadData();
             }
             isRunning = true;
-            animate();
+            lastFrameTime = performance.now();
+            animationId = requestAnimationFrame(animate);
         }
         
         function stopSimulation() {
@@ -1045,23 +1282,30 @@ HTML_TEMPLATE = '''
         function resetSimulation() {
             stopSimulation();
             currentIndex = 0;
-            displayBuffer = [];
             classifications = [];
-            lastBeatTime = 0;
+            falseDetections = [];
+            beatTimes = [];
             currentBeatWaveform = null;
+            viewOffset = 0;
+            isLive = true;
             
             document.getElementById('totalBeats').textContent = '0';
             document.getElementById('normalBeats').textContent = '0';
             document.getElementById('abnormalBeats').textContent = '0';
             document.getElementById('accuracy').textContent = '--';
             document.getElementById('heartRate').textContent = '--';
+            document.getElementById('falseCount').textContent = '0';
             document.getElementById('currentStatus').textContent = 'Waiting...';
             document.getElementById('currentStatus').className = 'value';
             document.getElementById('probBar').style.width = '0%';
             document.getElementById('probText').textContent = 'Abnormal Probability: --';
             document.getElementById('classificationList').innerHTML = 
                 '<p style="color: #888; text-align: center;">No classifications yet. Start the simulation!</p>';
+            document.getElementById('falseDetectionList').innerHTML = 
+                '<p style="color: #888; text-align: center;">No false detections yet.</p>';
             document.getElementById('currentTime').textContent = '0:00.000';
+            
+            updateHistoryUI();
             
             // Reset beat snapshot
             document.getElementById('beatTypeDisplay').textContent = '--';
