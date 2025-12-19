@@ -8,12 +8,26 @@ Features:
 - AI model classification using PyTorch ONNX models (v2/v3/v5/v6)
 - Live classification results display
 
+PREPROCESSING (matches training exactly):
+- v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak), single beat classification
+- v6 (Context-Aware): 200 samples per beat (90 before + 110 after R-peak), 7-beat context window
+  - Flatten to (1, 1400) → scale with training scaler → reshape to (1, 7, 200)
+  - Uses record 119 by default (excluded from training for true validation)
+
+DATA SOURCES:
+- v2/v3/v5: Uses demo_training_signal.csv by default (from training set)
+- v6: Uses 119.csv by default (MIT-BIH record 119, excluded from training)
+- --mit-bih: Uses 100.csv (may have distribution mismatch for v2/v3/v5)
+- --record-119: Force use of 119.csv for any model
+
 Usage:
     python realtime_frontend.py              # Uses v3 (LSTM) by default
     python realtime_frontend.py --model v2   # Use CNN model
     python realtime_frontend.py --model v3   # Use LSTM model
     python realtime_frontend.py --model v5   # Use Transformer model
     python realtime_frontend.py --model v6   # Use Context-Aware CNN1D (7-beat rolling buffer)
+                                             # Uses record 119 by default (true validation)
+    python realtime_frontend.py --model v6 --record-119   # Same as above (explicit)
     
     Then open http://localhost:5000 in your browser
 """
@@ -102,13 +116,20 @@ speed_multiplier = 10  # Speed up simulation (10x faster)
 beat_buffer = []  # List of (beat_waveform, beat_type) tuples
 
 
-def load_data(model_version='v3', use_training_data=True):
+def load_data(model_version='v3', use_training_data=True, use_record_119=False):
     """Load ECG signal, annotations, model, and scaler.
     
     Args:
         model_version: Which model to use ('v2', 'v3', 'v5', 'v6')
-        use_training_data: If True, use demo data from training set (recommended for accurate predictions).
-                          If False, use MIT-BIH 100.csv (different distribution, may give incorrect predictions).
+        use_training_data: If True, use demo data from training set (for v2/v3/v5).
+                          If False, use MIT-BIH record (100 or 119).
+        use_record_119: If True, use record 119 (excluded from training - true test).
+                       For v6, this is the default behavior.
+    
+    Preprocessing (matches training exactly):
+    - v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak)
+    - v6: 200 samples per beat (90 before + 110 after R-peak), 7-beat context window
+    - Normalization: Uses the same scaler trained on training data ONLY
     """
     global ecg_data, annotations, model, scaler, model_config, beat_buffer
     
@@ -118,8 +139,19 @@ def load_data(model_version='v3', use_training_data=True):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sample_dir = os.path.join(script_dir, 'sample')
     
+    # For v6, default to record 119 (the reserved test record excluded from training)
+    if model_version == 'v6':
+        use_record_119 = True
+        use_training_data = False
+        print("V6 Context-Aware Model: Using record 119 (excluded from training) for true validation")
+    
     # Choose data source
-    if use_training_data:
+    if use_record_119:
+        # Use MIT-BIH record 119 - excluded from v6 training for true test
+        signal_path = os.path.join(sample_dir, '119.csv')
+        annotation_path = os.path.join(sample_dir, '119annotations.txt')
+        print("Using MIT-BIH record 119 (excluded from training - true test data)")
+    elif use_training_data:
         # Use demo data created from training set - matches scaler distribution
         signal_path = os.path.join(sample_dir, 'demo_training_signal.csv')
         annotation_path = os.path.join(sample_dir, 'demo_training_annotations.txt')
@@ -127,12 +159,11 @@ def load_data(model_version='v3', use_training_data=True):
             print("Warning: Training demo data not found, falling back to MIT-BIH data")
             use_training_data = False
     
-    if not use_training_data:
+    if not use_training_data and not use_record_119:
         # Use MIT-BIH record 100 - different distribution from training
         signal_path = os.path.join(sample_dir, '100.csv')
         annotation_path = os.path.join(sample_dir, '100annotations.txt')
-        print("Note: Using MIT-BIH data which has different distribution than training data.")
-        print("      Model predictions may not be accurate. Use --training-data for accurate demo.")
+        print("Note: Using MIT-BIH record 100 which has different distribution than training data.")
     
     # Load signal
     df = pd.read_csv(signal_path)
@@ -189,9 +220,15 @@ def load_data(model_version='v3', use_training_data=True):
 
 
 def extract_beat_v6(signal, r_peak_idx):
-    """Extract beat for v6 context-aware model (200 samples, 90 before + 110 after R-peak)."""
-    start_idx = r_peak_idx - PRE_SAMPLES_V6
-    end_idx = r_peak_idx + POST_SAMPLES_V6
+    """Extract beat for v6 context-aware model.
+    
+    PREPROCESSING (matches training exactly):
+    - Beat length: 200 samples (90 before R-peak + 110 after R-peak)
+    - This matches the dataset creator: PRE_R_SAMPLES=90, POST_R_SAMPLES=110
+    - Edge cases handled with zero padding
+    """
+    start_idx = r_peak_idx - PRE_SAMPLES_V6  # 90 samples before R-peak
+    end_idx = r_peak_idx + POST_SAMPLES_V6    # 110 samples after R-peak
     
     # Handle edge cases with zero padding
     if start_idx < 0:
@@ -243,20 +280,24 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
                 'context_aware': True
             }
         
-        # Stack 7 beats into context window: (7, 200)
+        # ===== V6 PREPROCESSING (matches training exactly) =====
+        # 1. Stack 7 beats into context window: (7, 200)
         context_beats = np.stack([b for b, _ in beat_buffer], axis=0)
         
-        # Flatten for scaling: (1, 7*200) = (1, 1400)
-        flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_V6
+        # 2. Flatten for scaling: (1, 7*200) = (1, 1400)
+        #    This matches training: X_train_flat = X_train.reshape(n_train, flat_size)
+        flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_V6  # 7 * 200 = 1400
         context_flat = context_beats.reshape(1, flat_size)
         
-        # Normalize using scaler
+        # 3. Normalize using scaler (fitted on training data ONLY)
+        #    This matches training: scaler.fit_transform(X_train_flat)
         normalized = scaler.transform(context_flat).astype(np.float32)
         
-        # Reshape back to (1, 7, 200) for model
+        # 4. Reshape back to (1, 7, 200) for model input
+        #    This matches training: X_train_norm.reshape(-1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH)
         context_input = normalized.reshape(1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH_V6)
         
-        # Center beat info (index 3 in window of 7)
+        # Center beat info (index 3 in window of 7: positions 0,1,2,3,4,5,6)
         center_beat_type = beat_buffer[3][1]
         
     else:
@@ -1108,6 +1149,9 @@ def main():
     parser.add_argument('--mit-bih', action='store_true',
                         help='Use MIT-BIH record 100 data instead of training data. '
                              'Note: MIT-BIH has different distribution, predictions may be inaccurate.')
+    parser.add_argument('--record-119', action='store_true',
+                        help='Use MIT-BIH record 119 (excluded from v6 training). '
+                             'This is the default for v6 model - true validation data.')
     args = parser.parse_args()
     
     print("=" * 60)
@@ -1118,14 +1162,24 @@ def main():
     print(f"\nSelected model: {args.model.upper()}")
     if args.model == 'v6':
         print("  Context-Aware CNN1D: Uses 7-beat rolling buffer (3 prev + center + 3 next)")
+        print("  Beat extraction: 200 samples (90 before + 110 after R-peak)")
+        print("  Normalization: Flatten 7x200 → scale → reshape to (7, 200)")
         print("  First 3 beats will show 'WAITING' status until buffer is full")
-    use_training_data = not args.mit_bih
-    if use_training_data:
+        print("  Data: Using record 119 (excluded from training - true validation)")
+    
+    # Determine data source
+    use_training_data = not args.mit_bih and not args.record_119
+    use_record_119 = args.record_119 or args.model == 'v6'  # v6 defaults to record 119
+    
+    if use_record_119:
+        print("Using MIT-BIH record 119 (excluded from training - true test)")
+    elif use_training_data:
         print("Using demo data from training set (accurate predictions)")
     else:
-        print("Using MIT-BIH data (may have distribution mismatch)")
+        print("Using MIT-BIH record 100 (may have distribution mismatch)")
+    
     print("Loading data and model...")
-    load_data(model_version=args.model, use_training_data=use_training_data)
+    load_data(model_version=args.model, use_training_data=use_training_data, use_record_119=use_record_119)
     
     print(f"\nStarting web server on port {args.port}...")
     print(f"Open your browser and go to: http://localhost:{args.port}")
