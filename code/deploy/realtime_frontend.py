@@ -5,7 +5,7 @@ A mini web-based frontend that simulates real-time ECG monitoring and classifica
 Features:
 - Real-time ECG signal visualization
 - Automatic heartbeat detection at R-peaks
-- AI model classification using PyTorch ONNX models (v2/v3/v5)
+- AI model classification using PyTorch ONNX models (v2/v3/v5/v6)
 - Live classification results display
 
 Usage:
@@ -13,6 +13,7 @@ Usage:
     python realtime_frontend.py --model v2   # Use CNN model
     python realtime_frontend.py --model v3   # Use LSTM model
     python realtime_frontend.py --model v5   # Use Transformer model
+    python realtime_frontend.py --model v6   # Use Context-Aware CNN1D (7-beat rolling buffer)
     
     Then open http://localhost:5000 in your browser
 """
@@ -34,38 +35,53 @@ except ImportError:
     print("Install ONNXRuntime for ONNX model inference: pip install onnxruntime")
     sys.exit(1)
 
-# Model configurations for v2, v3, v5 PyTorch ONNX models
+# Model configurations for v2, v3, v5, v6 PyTorch ONNX models
 MODEL_CONFIGS = {
     'v2': {
         'name': 'CNN (v2)',
         'onnx_file': 'ecg_cnn_v2_pytorch_final.onnx',
         'scaler_file': 'scaler_v2_pytorch.pkl',
         'input_shape': (1, 1, 188),  # CNN: (batch, channels, length)
+        'beat_length': 188,
+        'context_aware': False,
     },
     'v3': {
         'name': 'LSTM (v3)',
         'onnx_file': 'ecg_lstm_v3_pytorch_final.onnx',
         'scaler_file': 'scaler_v3_pytorch.pkl',
         'input_shape': (1, 188, 1),  # LSTM: (batch, timesteps, features)
+        'beat_length': 188,
+        'context_aware': False,
     },
     'v5': {
         'name': 'Transformer (v5)',
         'onnx_file': 'ecg_transformer_v5_pytorch_final.onnx',
         'scaler_file': 'scaler_v5_pytorch.pkl',
         'input_shape': (1, 188, 1),  # Transformer: (batch, timesteps, features)
+        'beat_length': 188,
+        'context_aware': False,
     },
     'v6': {
-        'name': 'Advanced CNN1D on new dataset(v6)',
-        'onnx_file': 'ecg_cnn_v6_pytorch_final.onnx',
-        'scaler_file': 'scaler_v6_pytorch.pkl',
-        'input_shape': (86472, 1, 188),   # CNN: (batch, channels, length)
+        'name': 'Context-Aware CNN1D (v6)',
+        'onnx_file': 'context_ecg_model.onnx',
+        'scaler_file': 'context_ecg_scaler.pkl',
+        'input_shape': (1, 7, 200),  # Context: (batch, context_window, beat_length)
+        'beat_length': 200,
+        'context_aware': True,
+        'context_window_size': 7,
+        'pre_r_samples': 90,
+        'post_r_samples': 110,
     },
 }
 
 # Constants
-BEAT_LENGTH = 188
+BEAT_LENGTH = 188  # Default beat length (v2, v3, v5)
+BEAT_LENGTH_V6 = 200  # v6 beat length
 PRE_SAMPLES = 70
 POST_SAMPLES = 118
+PRE_SAMPLES_V6 = 90
+POST_SAMPLES_V6 = 110
+CONTEXT_WINDOW_SIZE = 7  # v6: 3 previous + 1 center + 3 subsequent beats
 SAMPLING_RATE = 360  # Hz - MIT-BIH standard sampling rate
 # Beat type classification: 'N' is Normal, anything else is Abnormal
 NORMAL_BEAT_TYPE = 'N'
@@ -82,16 +98,22 @@ classification_results = []
 is_running = False
 speed_multiplier = 10  # Speed up simulation (10x faster)
 
+# Rolling beat buffer for v6 context-aware model
+beat_buffer = []  # List of (beat_waveform, beat_type) tuples
+
 
 def load_data(model_version='v3', use_training_data=True):
     """Load ECG signal, annotations, model, and scaler.
     
     Args:
-        model_version: Which model to use ('v2', 'v3', 'v5')
+        model_version: Which model to use ('v2', 'v3', 'v5', 'v6')
         use_training_data: If True, use demo data from training set (recommended for accurate predictions).
                           If False, use MIT-BIH 100.csv (different distribution, may give incorrect predictions).
     """
-    global ecg_data, annotations, model, scaler, model_config
+    global ecg_data, annotations, model, scaler, model_config, beat_buffer
+    
+    # Reset beat buffer for v6 context-aware model
+    beat_buffer = []
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sample_dir = os.path.join(script_dir, 'sample')
@@ -166,40 +188,110 @@ def load_data(model_version='v3', use_training_data=True):
     print(f"Loaded {len(annotations)} annotations")
 
 
-def extract_and_classify_beat(signal, r_peak_idx, beat_type):
-    """Extract beat at R-peak and classify it using PyTorch ONNX model."""
-    start_idx = r_peak_idx - PRE_SAMPLES
-    end_idx = r_peak_idx + POST_SAMPLES
+def extract_beat_v6(signal, r_peak_idx):
+    """Extract beat for v6 context-aware model (200 samples, 90 before + 110 after R-peak)."""
+    start_idx = r_peak_idx - PRE_SAMPLES_V6
+    end_idx = r_peak_idx + POST_SAMPLES_V6
     
-    # Handle edge cases
+    # Handle edge cases with zero padding
     if start_idx < 0:
         pad_before = -start_idx
-        beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
+        beat = np.zeros(BEAT_LENGTH_V6, dtype=np.float32)
         available = signal[:end_idx]
         beat[pad_before:pad_before + len(available)] = available
     elif end_idx > len(signal):
-        beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
+        beat = np.zeros(BEAT_LENGTH_V6, dtype=np.float32)
         available = signal[start_idx:]
         beat[:len(available)] = available
     else:
         beat = signal[start_idx:end_idx].astype(np.float32)
     
-    # Store raw beat waveform for visualization (before normalization)
-    raw_beat = beat.copy()
+    return beat
+
+
+def extract_and_classify_beat(signal, r_peak_idx, beat_type):
+    """Extract beat at R-peak and classify it using PyTorch ONNX model."""
+    global beat_buffer
     
-    # Normalize using the scaler (fitted only on training data)
-    beat_2d = beat.reshape(1, -1)
-    normalized = scaler.transform(beat_2d).flatten().astype(np.float32)
+    # Check if using v6 context-aware model
+    is_context_aware = model_config.get('context_aware', False)
     
-    # Reshape for the specific model architecture
-    # model_config['input_shape'] contains the expected shape: (batch, ...)
-    input_shape = model_config['input_shape']
-    beat_input = normalized.reshape(input_shape)
+    if is_context_aware:
+        # V6: Extract 200-sample beat and add to rolling buffer
+        beat = extract_beat_v6(signal, r_peak_idx)
+        raw_beat = beat.copy()
+        
+        # Add beat to buffer
+        beat_buffer.append((beat, beat_type))
+        
+        # Keep only last 7 beats
+        if len(beat_buffer) > CONTEXT_WINDOW_SIZE:
+            beat_buffer = beat_buffer[-CONTEXT_WINDOW_SIZE:]
+        
+        # Need 7 beats for context-aware inference
+        if len(beat_buffer) < CONTEXT_WINDOW_SIZE:
+            # Not enough beats yet, return waiting status
+            return {
+                'r_peak': r_peak_idx,
+                'beat_type': beat_type,
+                'ground_truth': "NORMAL" if beat_type == NORMAL_BEAT_TYPE else "ABNORMAL",
+                'predicted': "WAITING",
+                'probability': 0.0,
+                'correct': None,
+                'beat_waveform': raw_beat.tolist(),
+                'buffer_size': len(beat_buffer),
+                'context_aware': True
+            }
+        
+        # Stack 7 beats into context window: (7, 200)
+        context_beats = np.stack([b for b, _ in beat_buffer], axis=0)
+        
+        # Flatten for scaling: (1, 7*200) = (1, 1400)
+        flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_V6
+        context_flat = context_beats.reshape(1, flat_size)
+        
+        # Normalize using scaler
+        normalized = scaler.transform(context_flat).astype(np.float32)
+        
+        # Reshape back to (1, 7, 200) for model
+        context_input = normalized.reshape(1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH_V6)
+        
+        # Center beat info (index 3 in window of 7)
+        center_beat_type = beat_buffer[3][1]
+        
+    else:
+        # V2, V3, V5: Single beat classification (188 samples)
+        start_idx = r_peak_idx - PRE_SAMPLES
+        end_idx = r_peak_idx + POST_SAMPLES
+        
+        # Handle edge cases
+        if start_idx < 0:
+            pad_before = -start_idx
+            beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
+            available = signal[:end_idx]
+            beat[pad_before:pad_before + len(available)] = available
+        elif end_idx > len(signal):
+            beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
+            available = signal[start_idx:]
+            beat[:len(available)] = available
+        else:
+            beat = signal[start_idx:end_idx].astype(np.float32)
+        
+        raw_beat = beat.copy()
+        
+        # Normalize using the scaler (fitted only on training data)
+        beat_2d = beat.reshape(1, -1)
+        normalized = scaler.transform(beat_2d).flatten().astype(np.float32)
+        
+        # Reshape for the specific model architecture
+        input_shape = model_config['input_shape']
+        context_input = normalized.reshape(input_shape)
+        center_beat_type = beat_type
     
     # ONNX model inference
     input_name = model.get_inputs()[0].name
     output_name = model.get_outputs()[0].name
-    output = model.run([output_name], {input_name: beat_input})[0]
+    output = model.run([output_name], {input_name: context_input})[0]
     
     # Handle output - PyTorch models output raw logits, apply softmax
     # Output: 0 = Normal, 1 = Abnormal
@@ -225,20 +317,26 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     predicted_label = "ABNORMAL" if predicted_class == 1 else "NORMAL"
     
     # Get ground truth: 'N' is Normal, anything else is Abnormal
-    if beat_type == NORMAL_BEAT_TYPE:
+    if center_beat_type == NORMAL_BEAT_TYPE:
         ground_truth = "NORMAL"
     else:
         ground_truth = "ABNORMAL"
     
-    return {
+    result = {
         'r_peak': r_peak_idx,
-        'beat_type': beat_type,
+        'beat_type': center_beat_type,
         'ground_truth': ground_truth,
         'predicted': predicted_label,
         'probability': round(prob_abnormal, 4),
         'correct': ground_truth == predicted_label,
         'beat_waveform': raw_beat.tolist()  # Include raw beat for visualization
     }
+    
+    if is_context_aware:
+        result['context_aware'] = True
+        result['buffer_size'] = len(beat_buffer)
+    
+    return result
 
 
 # HTML Template with embedded JavaScript for real-time visualization
@@ -1003,8 +1101,8 @@ def main():
     """Run the real-time frontend."""
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='ECG Real-Time Classification Frontend')
-    parser.add_argument('--model', '-m', type=str, default='v3', choices=['v2', 'v3', 'v5'],
-                        help='Model version to use: v2 (CNN), v3 (LSTM), v5 (Transformer). Default: v3')
+    parser.add_argument('--model', '-m', type=str, default='v3', choices=['v2', 'v3', 'v5', 'v6'],
+                        help='Model version to use: v2 (CNN), v3 (LSTM), v5 (Transformer), v6 (Context-Aware CNN1D). Default: v3')
     parser.add_argument('--port', '-p', type=int, default=5000,
                         help='Port to run the server on. Default: 5000')
     parser.add_argument('--mit-bih', action='store_true',
@@ -1018,6 +1116,9 @@ def main():
     print("=" * 60)
     
     print(f"\nSelected model: {args.model.upper()}")
+    if args.model == 'v6':
+        print("  Context-Aware CNN1D: Uses 7-beat rolling buffer (3 prev + center + 3 next)")
+        print("  First 3 beats will show 'WAITING' status until buffer is full")
     use_training_data = not args.mit_bih
     if use_training_data:
         print("Using demo data from training set (accurate predictions)")
