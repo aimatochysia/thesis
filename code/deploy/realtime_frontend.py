@@ -920,12 +920,6 @@ HTML_TEMPLATE = '''
             beatCtx.fillText('R-peak', rPeakX - 18, rPeakY - 10);
         }
         
-        // Speed slider
-        document.getElementById('speedSlider').addEventListener('input', (e) => {
-            speedMultiplier = parseInt(e.target.value);
-            document.getElementById('speedValue').textContent = speedMultiplier + 'x';
-        });
-        
         // Load data from server
         async function loadData() {
             const response = await fetch('/api/data');
