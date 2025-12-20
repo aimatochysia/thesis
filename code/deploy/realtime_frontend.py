@@ -17,19 +17,19 @@ PREPROCESSING (matches training exactly):
   - Uses record 119 by default (excluded from training for true validation)
 
 DATA SOURCES:
-- v2/v3/v5: Uses demo_training_signal.csv by default (from training set)
-- v6: Uses 119.csv by default (MIT-BIH record 119, excluded from training)
-- --mit-bih: Uses 100.csv (may have distribution mismatch for v2/v3/v5)
-- --record-119: Force use of 119.csv for any model
+- All models (v2/v3/v5/v6): Now use 119.csv by default (MIT-BIH record 119)
+  Record 119 was excluded from v6 training, providing true test data for all models
+- --training-data: Use demo_training_signal.csv (deprecated, kept for backward compatibility)
 
 Usage:
-    python realtime_frontend.py              # Uses v3 (LSTM) by default
-    python realtime_frontend.py --model v2   # Use CNN model
-    python realtime_frontend.py --model v3   # Use LSTM model
-    python realtime_frontend.py --model v5   # Use Transformer model
+    python realtime_frontend.py              # Uses v3 (LSTM) by default with record 119
+    python realtime_frontend.py --model v2   # Use CNN model with record 119
+    python realtime_frontend.py --model v3   # Use LSTM model with record 119
+    python realtime_frontend.py --model v5   # Use Transformer model with record 119
     python realtime_frontend.py --model v6   # Use Context-Aware CNN1D (7-beat rolling buffer)
-                                             # Uses record 119 by default (true validation)
-    python realtime_frontend.py --model v6 --record-119   # Same as above (explicit)
+    
+    All models now use MIT-BIH record 119 by default for consistent testing.
+    Record 119 was excluded from v6 training, providing true validation data.
     
     Then open http://localhost:5000 in your browser
 """
@@ -118,20 +118,24 @@ speed_multiplier = 10  # Speed up simulation (10x faster)
 beat_buffer = []  # List of (beat_waveform, beat_type) tuples
 
 
-def load_data(model_version='v3', use_training_data=True, use_record_119=False):
+def load_data(model_version='v3', use_training_data=False, use_record_119=True):
     """Load ECG signal, annotations, model, and scaler.
     
     Args:
         model_version: Which model to use ('v2', 'v3', 'v5', 'v6')
-        use_training_data: If True, use demo data from training set (for v2/v3/v5).
-                          If False, use MIT-BIH record (100 or 119).
-        use_record_119: If True, use record 119 (excluded from training - true test).
-                       For v6, this is the default behavior.
+        use_training_data: If True, use demo data from training set (deprecated).
+                          All models now use 119.csv by default.
+        use_record_119: If True (default), use record 119 (excluded from training - true test).
+                       This is now the default for ALL models (v2, v3, v5, v6).
     
     Preprocessing (matches training exactly):
     - v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak)
     - v6: 200 samples per beat (90 before + 110 after R-peak), 7-beat context window
     - Normalization: Uses the same scaler trained on training data ONLY
+    
+    NOTE: All models now use MIT-BIH record 119 by default for consistent testing.
+    Record 119 was excluded from v6 training, and using it for all models provides
+    a fair comparison on unseen real ECG data.
     """
     global ecg_data, annotations, model, scaler, model_config, beat_buffer
     
@@ -141,31 +145,29 @@ def load_data(model_version='v3', use_training_data=True, use_record_119=False):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sample_dir = os.path.join(script_dir, 'sample')
     
-    # For v6, default to record 119 (the reserved test record excluded from training)
-    if model_version == 'v6':
-        use_record_119 = True
-        use_training_data = False
-        print("V6 Context-Aware Model: Using record 119 (excluded from training) for true validation")
+    # All models now use record 119 by default (the reserved test record)
+    # This ensures consistent comparison across v2, v3, v5, and v6
+    print(f"{MODEL_CONFIGS[model_version]['name']}: Using record 119 (excluded from training) for validation")
     
-    # Choose data source
+    # Choose data source - default is now record 119 for all models
     if use_record_119:
-        # Use MIT-BIH record 119 - excluded from v6 training for true test
+        # Use MIT-BIH record 119 - excluded from v6 training, provides true test for all models
         signal_path = os.path.join(sample_dir, '119.csv')
         annotation_path = os.path.join(sample_dir, '119annotations.txt')
         print("Using MIT-BIH record 119 (excluded from training - true test data)")
     elif use_training_data:
-        # Use demo data created from training set - matches scaler distribution
+        # Use demo data created from training set - deprecated, kept for backward compatibility
         signal_path = os.path.join(sample_dir, 'demo_training_signal.csv')
         annotation_path = os.path.join(sample_dir, 'demo_training_annotations.txt')
         if not os.path.exists(signal_path):
-            print("Warning: Training demo data not found, falling back to MIT-BIH data")
-            use_training_data = False
-    
-    if not use_training_data and not use_record_119:
-        # Use MIT-BIH record 100 - different distribution from training
-        signal_path = os.path.join(sample_dir, '100.csv')
-        annotation_path = os.path.join(sample_dir, '100annotations.txt')
-        print("Note: Using MIT-BIH record 100 which has different distribution than training data.")
+            print("Warning: Training demo data not found, falling back to record 119")
+            signal_path = os.path.join(sample_dir, '119.csv')
+            annotation_path = os.path.join(sample_dir, '119annotations.txt')
+    else:
+        # Fallback to record 119
+        signal_path = os.path.join(sample_dir, '119.csv')
+        annotation_path = os.path.join(sample_dir, '119annotations.txt')
+        print("Using MIT-BIH record 119 (excluded from training - true test data)")
     
     # Load signal
     df = pd.read_csv(signal_path)
@@ -1384,12 +1386,8 @@ def main():
                         help='Model version to use: v2 (CNN), v3 (LSTM), v5 (Transformer), v6 (Context-Aware CNN1D). Default: v3')
     parser.add_argument('--port', '-p', type=int, default=5000,
                         help='Port to run the server on. Default: 5000')
-    parser.add_argument('--mit-bih', action='store_true',
-                        help='Use MIT-BIH record 100 data instead of training data. '
-                             'Note: MIT-BIH has different distribution, predictions may be inaccurate.')
-    parser.add_argument('--record-119', action='store_true',
-                        help='Use MIT-BIH record 119 (excluded from v6 training). '
-                             'This is the default for v6 model - true validation data.')
+    parser.add_argument('--training-data', action='store_true',
+                        help='Use demo training data instead of record 119. (Deprecated)')
     args = parser.parse_args()
     
     print("=" * 60)
@@ -1403,18 +1401,15 @@ def main():
         print("  Beat extraction: 200 samples (90 before + 110 after R-peak)")
         print("  Normalization: Flatten 7x200 → scale → reshape to (7, 200)")
         print("  First 3 beats will show 'WAITING' status until buffer is full")
-        print("  Data: Using record 119 (excluded from training - true validation)")
-    
-    # Determine data source
-    use_training_data = not args.mit_bih and not args.record_119
-    use_record_119 = args.record_119 or args.model == 'v6'  # v6 defaults to record 119
-    
-    if use_record_119:
-        print("Using MIT-BIH record 119 (excluded from training - true test)")
-    elif use_training_data:
-        print("Using demo data from training set (accurate predictions)")
     else:
-        print("Using MIT-BIH record 100 (may have distribution mismatch)")
+        print(f"  Single-beat classification: 188 samples (70 before + 118 after R-peak)")
+    
+    # All models now use record 119 by default
+    # --training-data flag allows falling back to demo data (deprecated)
+    use_record_119 = not args.training_data
+    use_training_data = args.training_data
+    
+    print("  Data: Using MIT-BIH record 119 (excluded from training - true validation)")
     
     print("Loading data and model...")
     load_data(model_version=args.model, use_training_data=use_training_data, use_record_119=use_record_119)

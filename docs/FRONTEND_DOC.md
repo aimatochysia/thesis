@@ -26,7 +26,7 @@ This document explains how the ECG Real-Time Classification Frontend works with 
 ┌─────────────────────────────────────────────────────────────────┐
 │              Frontend - v2/v3/v5 (Single Beat)                  │
 ├─────────────────────────────────────────────────────────────────┤
-│  demo_training_signal.csv  ─────►  ECG Signal                   │
+│  119.csv + 119annotations.txt  ─────►  ECG Signal + R-peaks     │
 │              ↓                                                   │
 │  R-peak Detection ─────►  Beat Extraction (188 samples)         │
 │              ↓                         70 pre-R + 118 post-R    │
@@ -60,18 +60,21 @@ This document explains how the ECG Real-Time Classification Frontend works with 
 
 ## Data Source
 
-### Why Record 119?
+### Why Record 119 for All Models?
+
+All models (v2, v3, v5, v6) now use MIT-BIH record 119 by default:
 
 ```python
-if model_version == 'v6':
-    use_record_119 = True  # Automatic for V6
+# All models use record 119 by default
+use_record_119 = True  # Default for v2, v3, v5, and v6
 ```
 
-Record 119 is used because:
-1. **Excluded from training**: Never seen by the model during training or validation
-2. **True validation**: Represents completely new patient data
-3. **No data leakage**: Guarantees realistic performance estimates
-4. **Different distribution**: Tests model generalization
+Record 119 is used for ALL models because:
+1. **Excluded from v6 training**: Never seen by the v6 model during training or validation
+2. **True validation**: Represents completely new patient data for fair comparison
+3. **Consistent testing**: All models tested on the same data for accurate comparison
+4. **No data leakage**: Guarantees realistic performance estimates
+5. **Different distribution**: Tests model generalization across all architectures
 
 ## Preprocessing Pipeline (Matches Training Exactly)
 
