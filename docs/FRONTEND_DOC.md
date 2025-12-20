@@ -1,24 +1,58 @@
-# V6 Frontend Deployment Guide
+# ECG Frontend Deployment Guide
 
 ## Overview
 
-This document explains how the ECG Real-Time Classification Frontend integrates with the context-aware V6 model, including preprocessing steps that exactly match training and the rolling beat buffer mechanism.
+This document explains how the ECG Real-Time Classification Frontend works with different model versions (v2, v3, v5, v6). Each model version has different preprocessing requirements that are automatically handled by the frontend.
+
+## Model Versions Comparison
+
+| Model | Architecture | Beat Length | Classification Type | Context |
+|-------|-------------|-------------|---------------------|---------|
+| **v2** | CNN (Conv1D) | 188 samples | **Single beat** | None |
+| **v3** | LSTM | 188 samples | **Single beat** | None |
+| **v5** | Transformer | 188 samples | **Single beat** | None |
+| **v6** | Context-Aware CNN1D | 200 samples | **Context window** | 7 beats |
+
+### Key Differences:
+
+- **v2/v3/v5**: Classify each beat **independently** using 188 samples (70 pre-R + 118 post-R)
+- **v6**: Classifies the **center beat** using context from 7 beats (200 samples each)
 
 ## Architecture
 
+### V2/V3/V5 Architecture (Single Beat Classification)
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Frontend (realtime_frontend.py)               │
+│              Frontend - v2/v3/v5 (Single Beat)                  │
+├─────────────────────────────────────────────────────────────────┤
+│  demo_training_signal.csv  ─────►  ECG Signal                   │
+│              ↓                                                   │
+│  R-peak Detection ─────►  Beat Extraction (188 samples)         │
+│              ↓                         70 pre-R + 118 post-R    │
+│  Single Beat ─────►  Normalize (188) ─────►  Reshape for model  │
+│              ↓                                                   │
+│  ONNX Inference ─────►  Classification (per beat)              │
+│              ↓                                                   │
+│  Real-time Visualization                                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### V6 Architecture (Context-Aware Classification)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Frontend - v6 (Context-Aware)                │
 ├─────────────────────────────────────────────────────────────────┤
 │  119.csv + 119annotations.txt  ─────►  ECG Signal + R-peaks     │
 │              ↓                                                   │
 │  R-peak Detection ─────►  Beat Extraction (200 samples)         │
-│              ↓                                                   │
+│              ↓                         90 pre-R + 110 post-R    │
 │  Rolling Buffer (7 beats) ─────►  Context Window                │
 │              ↓                                                   │
 │  Flatten (1400) ─────►  Normalize ─────►  Reshape (7, 200)      │
 │              ↓                                                   │
-│  ONNX Inference ─────►  Classification + Probability            │
+│  ONNX Inference ─────►  Classification (center beat)            │
 │              ↓                                                   │
 │  Real-time Visualization                                        │
 └─────────────────────────────────────────────────────────────────┘

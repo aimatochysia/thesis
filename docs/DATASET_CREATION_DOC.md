@@ -4,6 +4,38 @@
 
 This document describes the complete process for creating a context-aware ECG beat dataset from the MIT-BIH Arrhythmia Database. The dataset is specifically designed for subject-independent (record-wise) training and evaluation to ensure no patient leakage between training, validation, and test sets.
 
+## Two Dataset Creation Approaches
+
+There are **two different dataset creation notebooks** in this repository:
+
+### 1. `create-mitbih-dataset.ipynb` (RR Interval Approach - NOT USED for v6)
+
+This older notebook creates:
+- **188 samples per beat** (resampled from variable RR intervals)
+- **RR interval** as an additional feature (beat duration normalized)
+- Output: CSV file with 189 columns (188 samples + RR interval + label)
+- **Note**: This approach is NOT used for the current v6 context-aware model.
+
+### 2. `mitbih_context_dataset_creator.ipynb` (Context Window Approach - USED for v6) ✓
+
+This is the **correct notebook** for v6 training:
+- **200 samples per beat** (fixed window: 90 pre-R + 110 post-R)
+- **7-beat context windows** (no RR interval feature)
+- Output: numpy arrays (X_train.npy, y_train.npy, etc.)
+- **This is what you should use for v6 training.**
+
+### Which to Use?
+
+| Feature | RR Interval Approach | Context Window Approach (v6) |
+|---------|---------------------|------------------------------|
+| Notebook | `create-mitbih-dataset.ipynb` | `mitbih_context_dataset_creator.ipynb` |
+| Beat length | 188 samples (resampled) | 200 samples (fixed) |
+| Additional features | RR interval | Context from 7 beats |
+| Output format | CSV | NumPy arrays |
+| **Use for v6?** | ❌ No | ✓ Yes |
+
+**For v6 training, use `mitbih_context_dataset_creator.ipynb` and `mitbih_context_cnn1d_training.ipynb`.**
+
 ## Key Configuration Parameters
 
 | Parameter | Value | Rationale |
