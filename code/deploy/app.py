@@ -840,8 +840,11 @@ def get_frontend_html():
         }
         
         // Check for beats and classify
+        // At 60 FPS, we check (speedMultiplier * 6) samples per frame
+        // Formula: samples_per_frame = SAMPLING_RATE * speedMultiplier / FPS
         async function checkForBeats() {
-            const samplesToCheck = Math.max(1, Math.round(speedMultiplier * (SAMPLING_RATE / 60)));
+            const TARGET_FPS = 60;  // Animation frame rate
+            const samplesToCheck = Math.max(1, Math.round(speedMultiplier * (SAMPLING_RATE / TARGET_FPS)));
             const prevSample = currentIndex - samplesToCheck;
             
             for (const ann of annotations) {

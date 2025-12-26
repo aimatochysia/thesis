@@ -261,6 +261,10 @@ class InferenceEngine:
         output = self.model.run([output_name], {input_name: model_input})[0]
         
         # Process output - apply softmax if needed
+        # Validate output shape before accessing elements
+        if len(output.shape) < 2 or output.shape[0] < 1:
+            raise ValueError(f"Unexpected model output shape: {output.shape}")
+        
         if output.shape[1] == 2:
             needs_softmax = (np.min(output) < 0 or np.max(output) > 1 or 
                            abs(np.sum(output[0]) - 1.0) > 0.01)

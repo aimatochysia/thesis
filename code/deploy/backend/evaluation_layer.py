@@ -107,7 +107,8 @@ class EvaluationLayer:
             beat_length: Length of beat waveform
             
         Returns:
-            ClassificationResult with evaluation
+            ClassificationResult with evaluation, or None if prediction is 'WAITING'
+            (context-aware model buffer not full yet)
         """
         # Skip 'WAITING' predictions (context-aware model not ready)
         if predicted == 'WAITING':
