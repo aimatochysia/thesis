@@ -4,22 +4,31 @@ This document describes the refactored backend architecture for the ECG arrhythm
 
 ## Overview
 
-The backend has been refactored from a monolithic Flask application into a modular architecture with clear separation of concerns:
+The application has been refactored into a modular frontend/backend architecture with clear separation of concerns:
 
 ```
 code/deploy/
-├── app.py                      # Main Flask application
-├── backend/
+├── frontend/                    # Node.js Express frontend
+│   ├── package.json            # Dependencies
+│   ├── src/
+│   │   └── server.js           # Express server with API proxy
+│   └── public/                 # Static assets
+│       ├── index.html          # Main HTML page
+│       ├── css/styles.css      # Stylesheet
+│       └── js/                 # JavaScript modules
+│           ├── api.js          # API client
+│           ├── ecgRenderer.js  # ECG canvas renderer
+│           ├── beatRenderer.js # Beat snapshot renderer
+│           └── app.js          # Main application
+│
+├── backend/                     # Python modules
 │   ├── __init__.py            # Package exports
 │   ├── ecg_streamer.py        # Signal loading and streaming
 │   ├── inference_engine.py    # ONNX model inference
 │   └── evaluation_layer.py    # Performance evaluation
-├── sample/                     # Model files and test data
-│   ├── 119.csv                # Test signal (excluded from training)
-│   ├── 119annotations.txt     # Test annotations
-│   ├── *.onnx                 # ONNX model files
-│   └── *.pkl                  # Scaler files
-└── docs/                       # Documentation
+│
+├── app.py                       # Flask API server
+└── sample/                      # Model files and test data
 ```
 
 ## Module Responsibilities

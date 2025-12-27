@@ -1,0 +1,30 @@
+{
+  "name": "ecg-realtime-frontend",
+  "version": "1.0.0",
+  "description": "ECG Real-Time Classification Frontend - Thesis Project",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "build": "echo 'No build step required for this project'"
+  },
+  "keywords": [
+    "ecg",
+    "arrhythmia",
+    "classification",
+    "real-time",
+    "medical"
+  ],
+  "author": "Thesis Project",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "http-proxy-middleware": "^2.0.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
