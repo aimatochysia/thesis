@@ -696,7 +696,11 @@ HTML_TEMPLATE = '''
                 <button id="liveBtn" onclick="goToLive()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: linear-gradient(45deg, #ffd700, #ffb700); border: none; color: #1a1a2e; font-weight: bold; cursor: pointer;">🔴 Live</button>
                 <button id="fwdBtn" onclick="scrollHistory(1)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">▶ +1s</button>
                 <button id="fwd5Btn" onclick="scrollHistory(5)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">⏩ +5s</button>
+                <span style="margin: 0 10px; color: #444;">|</span>
+                <button onclick="exportECG('png')" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;">📷 Export PNG</button>
+                <button onclick="exportECG('jpeg')" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;">📄 Export JPEG</button>
             </div>
+            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 8px;">💡 Drag the graph to scroll through history</p>
         </div>
         
         <!-- Beat Snapshot Panel - Shows the current beat segment sent to ONNX model -->
@@ -860,6 +864,227 @@ HTML_TEMPLATE = '''
         }
         resizeCanvas();
         window.addEventListener('resize', resizeCanvas);
+        
+        // ============================================================
+        // DRAG INTERACTION FOR SCROLLABLE HISTORY
+        // ============================================================
+        let isDragging = false;
+        let lastDragX = 0;
+        
+        canvas.style.cursor = 'grab';
+        
+        function startDrag(x) {
+            isDragging = true;
+            lastDragX = x;
+            canvas.style.cursor = 'grabbing';
+        }
+        
+        function drag(x) {
+            if (!isDragging) return;
+            
+            const deltaX = x - lastDragX;
+            lastDragX = x;
+            
+            // Convert pixel delta to time delta (negative = go back in time)
+            const canvasWidth = canvas.getBoundingClientRect().width;
+            const secondsPerPixel = DISPLAY_SECONDS / canvasWidth;
+            const deltaSeconds = -deltaX * secondsPerPixel;
+            
+            if (Math.abs(deltaSeconds) > 0.01) {
+                scrollHistory(deltaSeconds);
+            }
+        }
+        
+        function endDrag() {
+            isDragging = false;
+            canvas.style.cursor = 'grab';
+        }
+        
+        // Mouse events
+        canvas.addEventListener('mousedown', (e) => startDrag(e.clientX));
+        canvas.addEventListener('mousemove', (e) => drag(e.clientX));
+        canvas.addEventListener('mouseup', () => endDrag());
+        canvas.addEventListener('mouseleave', () => endDrag());
+        
+        // Touch events for mobile
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startDrag(e.touches[0].clientX);
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            drag(e.touches[0].clientX);
+        });
+        canvas.addEventListener('touchend', () => endDrag());
+        
+        // ============================================================
+        // EXPORT TO MEDICAL IMAGE
+        // ============================================================
+        function exportECG(format = 'png') {
+            const exportWidth = 1200;
+            const exportHeight = 600;
+            
+            // Create a new canvas for export
+            const exportCanvas = document.createElement('canvas');
+            exportCanvas.width = exportWidth;
+            exportCanvas.height = exportHeight;
+            const exportCtx = exportCanvas.getContext('2d');
+            
+            // White background for medical printing
+            exportCtx.fillStyle = '#ffffff';
+            exportCtx.fillRect(0, 0, exportWidth, exportHeight);
+            
+            // Header section
+            exportCtx.fillStyle = '#333333';
+            exportCtx.font = 'bold 18px Arial';
+            exportCtx.fillText('ECG Analysis Report', 20, 30);
+            
+            exportCtx.font = '12px Arial';
+            exportCtx.fillStyle = '#666666';
+            const modelName = document.getElementById('modelName').textContent;
+            const timestamp = new Date().toISOString();
+            exportCtx.fillText('Model: ' + modelName, 20, 50);
+            exportCtx.fillText('Timestamp: ' + timestamp, 20, 68);
+            
+            // Get display window
+            let endSample = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
+            let startSample = Math.max(0, endSample - DISPLAY_SAMPLES);
+            let buffer = [];
+            for (let i = startSample; i < endSample && i < ecgData.length; i++) {
+                buffer.push(ecgData[i]);
+            }
+            
+            const timeStart = (startSample / SAMPLING_RATE).toFixed(2);
+            const timeEnd = (endSample / SAMPLING_RATE).toFixed(2);
+            exportCtx.fillText('Time Range: ' + timeStart + 's - ' + timeEnd + 's', 300, 50);
+            
+            // Graph area
+            const graphX = 50;
+            const graphY = 90;
+            const graphWidth = exportWidth - 100;
+            const graphHeight = exportHeight - 180;
+            
+            // Graph border
+            exportCtx.strokeStyle = '#cccccc';
+            exportCtx.lineWidth = 1;
+            exportCtx.strokeRect(graphX, graphY, graphWidth, graphHeight);
+            
+            // Medical ECG grid (red)
+            exportCtx.strokeStyle = '#ffcccc';
+            exportCtx.lineWidth = 0.5;
+            for (let x = graphX; x <= graphX + graphWidth; x += 20) {
+                exportCtx.beginPath();
+                exportCtx.moveTo(x, graphY);
+                exportCtx.lineTo(x, graphY + graphHeight);
+                exportCtx.stroke();
+            }
+            for (let y = graphY; y <= graphY + graphHeight; y += 20) {
+                exportCtx.beginPath();
+                exportCtx.moveTo(graphX, y);
+                exportCtx.lineTo(graphX + graphWidth, y);
+                exportCtx.stroke();
+            }
+            
+            // Large grid
+            exportCtx.strokeStyle = '#ff9999';
+            exportCtx.lineWidth = 1;
+            for (let x = graphX; x <= graphX + graphWidth; x += 100) {
+                exportCtx.beginPath();
+                exportCtx.moveTo(x, graphY);
+                exportCtx.lineTo(x, graphY + graphHeight);
+                exportCtx.stroke();
+            }
+            for (let y = graphY; y <= graphY + graphHeight; y += 100) {
+                exportCtx.beginPath();
+                exportCtx.moveTo(graphX, y);
+                exportCtx.lineTo(graphX + graphWidth, y);
+                exportCtx.stroke();
+            }
+            
+            // Draw ECG signal
+            if (buffer.length >= 2) {
+                const minVal = Math.min(...buffer);
+                const maxVal = Math.max(...buffer);
+                const range = maxVal - minVal || 1;
+                
+                exportCtx.strokeStyle = '#00aa66';
+                exportCtx.lineWidth = 1.5;
+                exportCtx.beginPath();
+                
+                for (let i = 0; i < buffer.length; i++) {
+                    const x = graphX + (i / buffer.length) * graphWidth;
+                    const y = graphY + graphHeight - ((buffer[i] - minVal) / range) * (graphHeight - 20) - 10;
+                    
+                    if (i === 0) {
+                        exportCtx.moveTo(x, y);
+                    } else {
+                        exportCtx.lineTo(x, y);
+                    }
+                }
+                exportCtx.stroke();
+                
+                // Draw R-peak markers
+                annotations.forEach(ann => {
+                    if (ann.sample_index > startSample && ann.sample_index <= endSample) {
+                        const bufferIdx = ann.sample_index - startSample;
+                        if (bufferIdx >= 0 && bufferIdx < buffer.length) {
+                            const x = graphX + (bufferIdx / buffer.length) * graphWidth;
+                            const y = graphY + graphHeight - ((buffer[bufferIdx] - minVal) / range) * (graphHeight - 20) - 10;
+                            
+                            // Check for false detection
+                            const classResult = classifications.find(c => c.r_peak === ann.sample_index);
+                            if (classResult && classResult.correct === false) {
+                                exportCtx.strokeStyle = '#cc8800';
+                                exportCtx.lineWidth = 2;
+                                exportCtx.beginPath();
+                                exportCtx.arc(x, y, 8, 0, Math.PI * 2);
+                                exportCtx.stroke();
+                            }
+                            
+                            // R-peak marker
+                            exportCtx.fillStyle = ann.beat_type === 'N' ? '#00aa66' : '#cc3333';
+                            exportCtx.beginPath();
+                            exportCtx.arc(x, y, 4, 0, Math.PI * 2);
+                            exportCtx.fill();
+                        }
+                    }
+                });
+            }
+            
+            // Legend
+            const legendY = exportHeight - 70;
+            exportCtx.font = '11px Arial';
+            exportCtx.fillStyle = '#00aa66';
+            exportCtx.beginPath();
+            exportCtx.arc(60, legendY, 5, 0, Math.PI * 2);
+            exportCtx.fill();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('Normal Beat', 72, legendY + 4);
+            
+            exportCtx.fillStyle = '#cc3333';
+            exportCtx.beginPath();
+            exportCtx.arc(180, legendY, 5, 0, Math.PI * 2);
+            exportCtx.fill();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('Abnormal Beat', 192, legendY + 4);
+            
+            exportCtx.strokeStyle = '#cc8800';
+            exportCtx.lineWidth = 2;
+            exportCtx.beginPath();
+            exportCtx.arc(320, legendY, 7, 0, Math.PI * 2);
+            exportCtx.stroke();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('False Detection', 335, legendY + 4);
+            
+            // Create download link
+            const dataURL = exportCanvas.toDataURL('image/' + format, 0.95);
+            const link = document.createElement('a');
+            link.download = 'ecg_export_' + timestamp.replace(/[:.]/g, '-') + '.' + format;
+            link.href = dataURL;
+            link.click();
+            
+            console.log('[ECG] Exported ' + format.toUpperCase() + ' image');
+        }
         
         // Draw beat waveform on the beat snapshot canvas
         function drawBeatWaveform(waveform, isAbnormal = false) {
@@ -1074,6 +1299,7 @@ HTML_TEMPLATE = '''
             for (const ann of annotations) {
                 if (ann.sample_index > prevSample && ann.sample_index <= currentIndex && ann.beat_type !== '+') {
                     // Found a beat! Classify it
+                    console.log('[ECG] Calling model for beat at sample', ann.sample_index, 'type:', ann.beat_type);
                     try {
                         const response = await fetch('/api/classify', {
                             method: 'POST',
@@ -1084,6 +1310,7 @@ HTML_TEMPLATE = '''
                             })
                         });
                         const result = await response.json();
+                        console.log('[ECG] Classification result:', result.predicted, 'prob:', result.probability);
                         addClassification(result);
                         
                         // Calculate heart rate
