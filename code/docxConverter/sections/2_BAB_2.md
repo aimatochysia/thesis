@@ -283,7 +283,119 @@ adalah matriks *eigenvector* dari kovariansi X. PCA dinyatakan efektif
 (Eleyan & Alboghbaish, 2024) dalam meningkatkan efisiensi pelatihan
 model ECG dengan tetap mempertahankan informasi utama dari sinyal.
 
-**2.8 CNN dan Conv-1D**
+**2.7.1 Standard Scaler untuk Normalisasi Data**
+
+Dalam konteks pembelajaran mesin untuk klasifikasi sinyal ECG, normalisasi data menggunakan *Standard Scaler* merupakan teknik krusial untuk memastikan konvergensi model yang optimal. *Standard Scaler* mentransformasi setiap fitur sehingga memiliki rata-rata 0 dan standar deviasi 1, mengikuti distribusi Gaussian standar. Transformasi ini diberikan oleh **persamaan (4)**:
+
+$$x_{scaled} = \frac{x - \mu}{\sigma}$$
+
+di mana:
+- $x$ adalah nilai fitur asli
+- $\mu$ adalah rata-rata fitur pada data pelatihan
+- $\sigma$ adalah standar deviasi fitur pada data pelatihan
+- $x_{scaled}$ adalah nilai fitur yang telah dinormalisasi
+
+**Prosedur No-Peeking (Mencegah Kebocoran Data)**
+
+Aspek kritis dalam penerapan *Standard Scaler* adalah prosedur *no-peeking* untuk mencegah kebocoran informasi (*data leakage*). Prosedur ini mengharuskan:
+
+1. **Fit pada Data Training SAJA**: Parameter statistik ($\mu$ dan $\sigma$) hanya dihitung dari data pelatihan
+2. **Transform pada Semua Set**: Parameter yang sama digunakan untuk mentransformasi data validasi dan pengujian
+3. **Tidak Ada Akses ke Data Uji**: Data uji tidak boleh mempengaruhi parameter normalisasi
+
+Pelanggaran prosedur ini akan menyebabkan model memiliki akses tidak langsung ke informasi dari data uji, menghasilkan metrik evaluasi yang terlalu optimis dan tidak merepresentasikan performa sebenarnya pada data baru.
+
+**2.7.2 Context Window (Jendela Konteks)**
+
+Pendekatan *context-aware* dalam klasifikasi ECG menggunakan konsep jendela konteks (*context window*) untuk menangkap informasi temporal antar-detak jantung. Berbeda dengan klasifikasi per-detak yang mengisolasi setiap detak, pendekatan ini mempertimbangkan pola ritme dalam urutan detak.
+
+**Mengapa 7 Detak?**
+
+Pemilihan ukuran jendela konteks sebesar 7 detak (3 sebelum + 1 pusat + 3 sesudah) didasarkan pada pertimbangan berikut:
+
+1. **Deteksi Pola Bigeminy/Trigeminy**: Pola aritmia seperti *bigeminy* (setiap detak kedua abnormal) dan *trigeminy* (setiap detak ketiga abnormal) memerlukan minimal 4-6 detak untuk diidentifikasi. Jendela 7 detak memberikan margin yang cukup.
+
+2. **Konteks Temporal yang Memadai**: Dengan frekuensi jantung normal 60-100 BPM, 7 detak mencakup sekitar 4.2-7 detik, memberikan konteks temporal yang representatif.
+
+3. **Keseimbangan Komputasi**: Ukuran yang lebih besar akan meningkatkan kompleksitas model dan kebutuhan memori secara eksponensial, sementara ukuran yang lebih kecil mungkin tidak cukup untuk menangkap pola temporal.
+
+4. **Simetri Temporal**: Komposisi simetris (3+1+3) memungkinkan model mempelajari konteks sebelum dan sesudah detak pusat secara seimbang.
+
+**Representasi Matematis**
+
+Untuk detak pusat pada posisi $t$, jendela konteks didefinisikan sebagai **persamaan (5)**:
+
+$$W_t = [b_{t-3}, b_{t-2}, b_{t-1}, b_t, b_{t+1}, b_{t+2}, b_{t+3}]$$
+
+di mana $b_i$ adalah representasi vektor dari detak ke-$i$ dengan dimensi 200 sampel. Label klasifikasi ditentukan oleh detak pusat $b_t$ saja, sementara detak sekitarnya berfungsi sebagai fitur kontekstual.
+
+**2.8 Algoritma Pan-Tompkins untuk Deteksi R-Peak**
+
+Algoritma Pan-Tompkins adalah metode standar industri untuk mendeteksi kompleks QRS dalam sinyal elektrokardiogram (ECG). Dikembangkan oleh Jiapu Pan dan Willis J. Tompkins pada tahun 1985, algoritma ini telah menjadi referensi utama dalam pemrosesan sinyal ECG digital karena kemampuannya mendeteksi puncak gelombang R (R-peak) secara akurat bahkan dalam kondisi noise yang tinggi (Pan & Tompkins, 1985).
+
+**2.8.1 Tahapan Pemrosesan Algoritma Pan-Tompkins**
+
+Algoritma Pan-Tompkins terdiri dari lima tahapan pemrosesan berurutan yang dirancang untuk menekan noise sekaligus memperkuat karakteristik kompleks QRS:
+
+**1. Band-Pass Filtering**
+
+Tahap pertama adalah filtering untuk menghilangkan noise frekuensi rendah (baseline wander) dan frekuensi tinggi (muscle noise, powerline interference). Filter ini merupakan kombinasi dari low-pass filter dan high-pass filter dengan rentang frekuensi 5-15 Hz. Persamaan transfer function untuk low-pass filter adalah:
+
+$$H_{LP}(z) = \frac{(1 - z^{-6})^2}{(1 - z^{-1})^2}$$
+
+Sedangkan untuk high-pass filter:
+
+$$H_{HP}(z) = \frac{(-1 + 32z^{-16} + z^{-32})}{(1 + z^{-1})}$$
+
+Hasil kombinasi kedua filter menghasilkan band-pass filter dengan passband 5-15 Hz, yang merupakan rentang frekuensi dominan dari kompleks QRS.
+
+**2. Differentiation (Turunan)**
+
+Setelah filtering, sinyal diturunkan untuk menekankan perubahan amplitudo yang cepat (slope) yang merupakan karakteristik kompleks QRS. Operasi diferensiasi diberikan oleh persamaan:
+
+$$y(n) = \frac{1}{8T}[-x(n-2) - 2x(n-1) + 2x(n+1) + x(n+2)]$$
+
+di mana T adalah periode sampling dan x(n) adalah sampel sinyal pada waktu n. Turunan lima titik ini memberikan estimasi slope yang lebih stabil dibandingkan turunan dua titik sederhana.
+
+**3. Squaring (Pengkuadratan)**
+
+Langkah pengkuadratan bertujuan untuk membuat semua nilai menjadi positif dan menekankan perbedaan yang dihasilkan dari turunan. Persamaan pengkuadratan adalah:
+
+$$y(n) = [x(n)]^2$$
+
+Operasi ini menghasilkan sinyal yang memiliki puncak tajam pada lokasi kompleks QRS karena slope yang tinggi pada gelombang R.
+
+**4. Moving Window Integration**
+
+Integrasi jendela bergerak digunakan untuk memperhalus sinyal dan menghasilkan satu puncak per kompleks QRS. Persamaan integrasi adalah:
+
+$$y(n) = \frac{1}{N}[x(n - (N-1)) + x(n - (N-2)) + ... + x(n)]$$
+
+di mana N adalah lebar jendela integrasi. Untuk frekuensi sampling 360 Hz, N biasanya dipilih sekitar 30 sampel (≈83 ms), yang sesuai dengan durasi kompleks QRS normal (80-120 ms).
+
+**5. Adaptive Thresholding**
+
+Tahap akhir adalah penerapan threshold adaptif untuk menentukan lokasi R-peak. Dua threshold digunakan secara bersamaan: threshold pada sinyal terintegrasi dan threshold pada sinyal terfilter. Threshold ini diadaptasi secara dinamis berdasarkan statistik sinyal:
+
+$$THRESHOLD = SPKI + 0.25 \times (SPKF - NPKF)$$
+
+di mana:
+- SPKI = Signal Peak (rata-rata puncak sinyal yang terdeteksi sebagai QRS)
+- NPKF = Noise Peak (rata-rata puncak noise)
+- SPKF = Signal Peak pada sinyal terfilter
+
+**2.8.2 Refractory Period dan Search-Back**
+
+Algoritma juga menerapkan *refractory period* minimal 200 ms setelah deteksi QRS untuk mencegah deteksi ganda pada kompleks QRS yang sama. Selain itu, mekanisme *search-back* diterapkan jika tidak ada QRS terdeteksi dalam interval yang lebih panjang dari yang diharapkan (berdasarkan interval RR sebelumnya), algoritma akan mencari kembali dengan threshold yang lebih rendah.
+
+**2.8.3 Keunggulan Algoritma Pan-Tompkins**
+
+1. **Adaptif terhadap variasi sinyal**: Threshold yang menyesuaikan secara dinamis memungkinkan deteksi akurat pada berbagai kondisi pasien
+2. **Robust terhadap noise**: Kombinasi filtering dan pengkuadratan efektif menekan berbagai jenis noise
+3. **Efisiensi komputasional**: Operasi sederhana memungkinkan implementasi real-time bahkan pada perangkat dengan sumber daya terbatas
+4. **Akurasi tinggi**: Studi menunjukkan sensitivitas >99% pada dataset standar seperti MIT-BIH
+
+**2.9 CNN dan Conv-1D**
 
 *Convolutional Neural Network* (CNN) adalah salah satu jenis deep neural
 network yang menggunakan operasi linear matematika antar matriks yang
@@ -421,6 +533,42 @@ positives (FP), dan false negatives (FN) ditunjukkan pada **Gambar
 height="1.8229166666666667in"}
 
 **Gambar 2.7** Confusion Matrix
+
+**2.10.1 Early Stopping dan Regularisasi**
+
+*Early Stopping* adalah teknik regularisasi yang mencegah *overfitting* dengan menghentikan proses pelatihan sebelum model terlalu menyesuaikan diri dengan data pelatihan. Mekanisme ini bekerja dengan memantau metrik kinerja pada data validasi selama pelatihan:
+
+1. **Prinsip Kerja**: Setiap epoch, kinerja model pada data validasi dievaluasi. Jika tidak ada peningkatan selama sejumlah epoch tertentu (disebut *patience*), pelatihan dihentikan.
+
+2. **Pemilihan Model Terbaik**: Model dengan kinerja validasi terbaik disimpan sebagai *checkpoint* dan digunakan sebagai model akhir.
+
+3. **Metrik Pemantauan**: Dalam klasifikasi ECG, AUC-ROC sering digunakan sebagai metrik pemantauan karena lebih robust terhadap ketidakseimbangan kelas dibandingkan akurasi.
+
+**ReduceLROnPlateau**
+
+Teknik *learning rate scheduling* yang menurunkan *learning rate* secara otomatis ketika metrik validasi stagnan:
+
+$$lr_{new} = lr_{current} \times factor$$
+
+di mana *factor* biasanya bernilai 0.1-0.5. Teknik ini memungkinkan model melakukan penyesuaian bobot yang lebih halus saat mendekati konvergensi.
+
+**2.10.2 Distribution Shift dalam Pembagian Data Record-Wise**
+
+Fenomena *distribution shift* terjadi ketika distribusi kelas pada data validasi berbeda signifikan dari data pelatihan. Dalam konteks klasifikasi ECG dengan pembagian *record-wise*:
+
+1. **Penyebab**: Pembagian berdasarkan rekaman pasien (bukan per-detak) dapat menghasilkan distribusi kelas yang tidak seimbang antar subset. Beberapa rekaman pasien mungkin mengandung lebih banyak aritmia dibandingkan yang lain.
+
+2. **Manifestasi**: Model menunjukkan:
+   - Peningkatan loss pada training tetapi penurunan pada validasi
+   - AUC training sangat tinggi (>0.99) tetapi AUC validasi lebih rendah
+   - *Early stopping* terpicu di epoch awal
+
+3. **Implikasi**: Ini bukan *overfitting* dalam pengertian tradisional, melainkan model kesulitan mengeneralisasi ke distribusi yang berbeda. Model yang dihentikan lebih awal seringkali memiliki generalisasi yang lebih baik karena belum terlalu menyesuaikan dengan distribusi spesifik data pelatihan.
+
+4. **Mitigasi**: 
+   - Stratified record-wise split (mengelompokkan rekaman berdasarkan rasio abnormal sebelum pembagian)
+   - Penggunaan class weights yang dinamis
+   - Validasi pada data yang benar-benar tidak terlihat (seperti record 119 yang dikecualikan dari training)
 
 **2.11 *Open Neural Network Exchange* (ONNX)**
 

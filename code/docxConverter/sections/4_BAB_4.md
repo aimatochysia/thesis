@@ -211,3 +211,7 @@ Stanley, H. E. (2000). *PhysioBank, PhysioToolkit, and PhysioNet:
 Components of a new research resource for complex physiologic signals.
 Circulation,* 101(23), e215--e220.
 https://doi.org/10.1161/01.CIR.101.23.e215
+
+Pan, J., & Tompkins, W. J. (1985). *A real-time QRS detection algorithm.
+IEEE Transactions on Biomedical Engineering,* BME-32(3), 230--236.
+https://doi.org/10.1109/TBME.1985.325532
