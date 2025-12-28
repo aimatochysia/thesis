@@ -10,7 +10,7 @@ def docx_to_md(input_docx, output_md):
 
 if __name__ == "__main__":
     input_file = "input.docx"
-    output_file = "output.md"
+    output_file = "thesis_base.md"
 
     if not Path(input_file).exists():
         raise FileNotFoundError(f"{input_file} not found")
