@@ -9,11 +9,11 @@ BAB 5**
 
 Penelitian ini telah berhasil mengembangkan dan menguji model
 Convolutional Neural Network 1D untuk klasifikasi sinyal ECG, yang mampu
-mencapai akurasi 98.73%. Hasil evaluasi yang menggembirakan ini
+mencapai akurasi 94% pada data validasi yang benar-benar tidak terlihat (record 119 MIT-BIH). Hasil evaluasi yang menggembirakan ini
 menunjukkan bahwa model ini tidak hanya efektif dalam membedakan antara
 sinyal normal dan abnormal, tetapi juga sangat stabil dalam kondisi yang
 memiliki noise atau fluktuasi, yang sering menjadi tantangan dalam
-aplikasi dunia nyata. Metrik lain seperti precision, recall, F1-score,
+aplikasi dunia nyata. Model ini juga mencapai akurasi 98% pada data test set yang memiliki distribusi serupa dengan data pelatihan. Metrik lain seperti precision, recall, F1-score,
 dan ROC-AUC menunjukkan bahwa model ini dapat digunakan dengan
 kepercayaan tinggi untuk aplikasi deteksi dini penyakit jantung,
 terutama dalam sistem pemantauan berbasis perangkat wearable.

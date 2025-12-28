@@ -310,9 +310,9 @@ $$\Delta t = \ \frac{1}{fs} = \frac{1}{360}\  \approx 2.78ms$$
 > milidetik. Total durasi window time untuk satu baris data ditunjukkan
 > oleh persamaan 8
 
-$$T_{window} = 188\  \times 2.78ms\  \approx 522.6ms$$
+$$T_{window} = 200\  \times 2.78ms\  \approx 556ms$$
 
-> Durasi sekitar 0,52 detik ini dipilih karena ideal dalam menangkap
+> Durasi sekitar 0,56 detik ini dipilih karena ideal dalam menangkap
 > satu detak jantung secara utuh tanpa ada banyak gangguan dari detak
 > lainnya
 >
