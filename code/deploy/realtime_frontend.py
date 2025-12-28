@@ -779,6 +779,13 @@ HTML_TEMPLATE = '''
         let viewOffset = 0;  // 0 = live view, negative = viewing history
         let isLive = true;
         
+        // High-speed stability: track pending classification requests
+        let isClassifying = false;
+        let classificationQueue = [];  // Queue for pending beats to classify
+        let processedBeats = new Set();  // Track already processed beats to avoid duplicates
+        const MAX_CLASSIFICATIONS = 1000;  // Limit stored classifications to prevent memory issues
+        const MAX_FALSE_DETECTIONS = 100;  // Limit stored false detections
+        
         const SAMPLING_RATE = 360;
         const DISPLAY_SECONDS = 5;
         const DISPLAY_SAMPLES = SAMPLING_RATE * DISPLAY_SECONDS;
@@ -1290,16 +1297,39 @@ HTML_TEMPLATE = '''
             return Math.round(60 / avgInterval);
         }
         
-        // Check for beats and classify
+        // Check for beats and classify - with throttling for high-speed mode
         async function checkForBeats() {
+            // Skip if already processing classifications
+            if (isClassifying) return;
+            
             // Calculate samples to check based on speed
             const samplesToCheck = Math.max(1, Math.round(speedMultiplier * (SAMPLING_RATE / 60)));
             const prevSample = currentIndex - samplesToCheck;
             
+            // Collect beats to classify (avoid duplicates)
+            const beatsToClassify = [];
             for (const ann of annotations) {
-                if (ann.sample_index > prevSample && ann.sample_index <= currentIndex && ann.beat_type !== '+') {
-                    // Found a beat! Classify it
-                    console.log('[ECG] Calling model for beat at sample', ann.sample_index, 'type:', ann.beat_type);
+                if (ann.sample_index > prevSample && ann.sample_index <= currentIndex && 
+                    ann.beat_type !== '+' && !processedBeats.has(ann.sample_index)) {
+                    beatsToClassify.push(ann);
+                }
+            }
+            
+            if (beatsToClassify.length === 0) return;
+            
+            isClassifying = true;
+            
+            try {
+                for (const ann of beatsToClassify) {
+                    // Mark as processed immediately to prevent duplicates
+                    processedBeats.add(ann.sample_index);
+                    
+                    // Limit processed beats set size to prevent memory issues
+                    if (processedBeats.size > 5000) {
+                        const toRemove = [...processedBeats].slice(0, 1000);
+                        toRemove.forEach(v => processedBeats.delete(v));
+                    }
+                    
                     try {
                         const response = await fetch('/api/classify', {
                             method: 'POST',
@@ -1310,7 +1340,7 @@ HTML_TEMPLATE = '''
                             })
                         });
                         const result = await response.json();
-                        console.log('[ECG] Classification result:', result.predicted, 'prob:', result.probability);
+                        console.log('[ECG] Beat at', ann.sample_index, ':', result.predicted);
                         addClassification(result);
                         
                         // Calculate heart rate
@@ -1322,6 +1352,8 @@ HTML_TEMPLATE = '''
                         console.error('Classification error:', e);
                     }
                 }
+            } finally {
+                isClassifying = false;
             }
         }
         
@@ -1329,9 +1361,18 @@ HTML_TEMPLATE = '''
         function addClassification(result) {
             classifications.unshift(result);
             
+            // Limit array size to prevent memory issues at high speed
+            if (classifications.length > MAX_CLASSIFICATIONS) {
+                classifications = classifications.slice(0, MAX_CLASSIFICATIONS);
+            }
+            
             // Track false detections
             if (result.correct === false) {
                 falseDetections.unshift(result);
+                // Limit false detections array
+                if (falseDetections.length > MAX_FALSE_DETECTIONS) {
+                    falseDetections = falseDetections.slice(0, MAX_FALSE_DETECTIONS);
+                }
                 updateFalseDetectionList();
             }
             
@@ -1511,6 +1552,11 @@ HTML_TEMPLATE = '''
             currentBeatWaveform = null;
             viewOffset = 0;
             isLive = true;
+            
+            // Reset high-speed stability tracking
+            isClassifying = false;
+            classificationQueue = [];
+            processedBeats.clear();
             
             document.getElementById('totalBeats').textContent = '0';
             document.getElementById('normalBeats').textContent = '0';
