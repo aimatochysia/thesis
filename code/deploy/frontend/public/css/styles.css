@@ -246,6 +246,27 @@ h1 {
     font-weight: bold;
 }
 
+.nav-btn.export {
+    background: rgba(0, 136, 255, 0.2);
+    border-color: rgba(0, 136, 255, 0.5);
+}
+
+.nav-btn.export:hover {
+    background: rgba(0, 136, 255, 0.4);
+}
+
+.nav-separator {
+    color: rgba(255, 255, 255, 0.3);
+    padding: 0 5px;
+}
+
+.drag-hint {
+    text-align: center;
+    font-size: 11px;
+    color: #666;
+    margin-top: 8px;
+}
+
 /* ============================================================
    BEAT SNAPSHOT
    ============================================================ */

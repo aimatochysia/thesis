@@ -45,6 +45,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     ecgRenderer = new ECGRenderer('ecgCanvas');
     beatRenderer = new BeatRenderer('beatCanvas');
     
+    // Set up drag callback for interactive scrolling
+    ecgRenderer.setDragCallback((deltaSeconds) => {
+        if (currentIndex < DISPLAY_SAMPLES) return;
+        
+        viewOffset += deltaSeconds;
+        const maxHistory = -currentIndex / SAMPLING_RATE;
+        viewOffset = Math.max(maxHistory, Math.min(0, viewOffset));
+        isLive = viewOffset >= -0.1;
+        
+        updateHistoryUI();
+        drawECG();
+        updateTime();
+    });
+    
     // Load model info
     await loadModelInfo();
     
@@ -62,12 +76,15 @@ document.addEventListener('DOMContentLoaded', async () => {
  */
 async function loadData() {
     try {
+        console.log('[ECG] Loading ECG data from backend...');
         const data = await api.loadData();
         ecgData = data.signal;
         annotations = data.annotations;
-        console.log(`Loaded ${ecgData.length} samples and ${annotations.length} annotations`);
+        console.log(`[ECG] ✓ Loaded ${ecgData.length} samples and ${annotations.length} annotations`);
+        console.log(`[ECG] First annotation:`, annotations[0]);
+        console.log(`[ECG] Signal min/max:`, Math.min(...ecgData.slice(0, 1000)), Math.max(...ecgData.slice(0, 1000)));
     } catch (error) {
-        console.error('Failed to load ECG data:', error);
+        console.error('[ECG] ✗ Failed to load ECG data:', error);
         showError('Failed to load ECG data. Is the backend running?');
     }
 }
@@ -212,12 +229,14 @@ async function checkForBeats() {
     for (const ann of annotations) {
         if (ann.sample_index > prevSample && ann.sample_index <= currentIndex && ann.beat_type !== '+') {
             try {
+                console.log(`[ECG] Calling model for beat at sample ${ann.sample_index}, type: ${ann.beat_type}`);
                 const result = await api.classify(ann.sample_index, ann.beat_type);
+                console.log(`[ECG] Classification result:`, result);
                 if (result.predicted !== 'WAITING') {
                     addClassification(result);
                 }
             } catch (error) {
-                console.error('Classification error:', error);
+                console.error('[ECG] Classification error:', error);
             }
         }
     }
@@ -439,6 +458,55 @@ function resetSimulation() {
     api.control('reset').catch(console.error);
 }
 
+// ============================================================
+// EXPORT FUNCTIONALITY
+// ============================================================
+
+/**
+ * Export ECG graph as medical-format image
+ * @param {string} format - 'png' or 'jpeg'
+ */
+function exportECG(format = 'png') {
+    let endSample = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
+    let startSample = Math.max(0, endSample - DISPLAY_SAMPLES);
+    
+    const samples = ecgData.slice(startSample, endSample);
+    const modelName = document.getElementById('modelName').textContent || 'ECG Model';
+    
+    const exportOptions = {
+        samples,
+        annotations,
+        startSample,
+        classifications,
+        modelName,
+        timestamp: new Date().toISOString(),
+        format,
+        showGrid: true
+    };
+    
+    const filename = `ecg_report_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    ecgRenderer.downloadAsImage(exportOptions, filename);
+}
+
+/**
+ * Export beat snapshot as image
+ * @param {string} format - 'png' or 'jpeg'
+ */
+function exportBeatSnapshot(format = 'png') {
+    if (!currentBeatWaveform) {
+        alert('No beat waveform available. Run the simulation first.');
+        return;
+    }
+    
+    const canvas = document.getElementById('beatCanvas');
+    const dataUrl = canvas.toDataURL(`image/${format}`, 0.95);
+    
+    const link = document.createElement('a');
+    link.download = `beat_snapshot_${new Date().toISOString().replace(/[:.]/g, '-')}.${format}`;
+    link.href = dataUrl;
+    link.click();
+}
+
 // Make functions globally accessible
 window.startSimulation = startSimulation;
 window.stopSimulation = stopSimulation;
@@ -447,3 +515,5 @@ window.setSpeed = setSpeed;
 window.scrollHistory = scrollHistory;
 window.goToLive = goToLive;
 window.navigateToTime = navigateToTime;
+window.exportECG = exportECG;
+window.exportBeatSnapshot = exportBeatSnapshot;

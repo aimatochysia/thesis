@@ -70,7 +70,11 @@
                 <button class="nav-btn live" id="liveBtn" onclick="goToLive()">🔴 Live</button>
                 <button class="nav-btn" id="fwdBtn" onclick="scrollHistory(1)" disabled>▶ +1s</button>
                 <button class="nav-btn" id="fwd5Btn" onclick="scrollHistory(5)" disabled>⏩ +5s</button>
+                <span class="nav-separator">|</span>
+                <button class="nav-btn export" onclick="exportECG('png')">📷 Export PNG</button>
+                <button class="nav-btn export" onclick="exportECG('jpeg')">📄 Export JPEG</button>
             </div>
+            <p class="drag-hint">💡 Drag the graph to scroll through history</p>
         </div>
         
         <!-- Beat Snapshot Container -->
