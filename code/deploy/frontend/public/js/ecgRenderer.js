@@ -5,11 +5,23 @@
  * signal trace, R-peak markers, drag interaction, and export.
  */
 
+// Configuration constants
+const ECG_CONFIG = {
+    SAMPLING_RATE: 360,        // MIT-BIH sampling rate in Hz
+    DISPLAY_SECONDS: 5,        // Seconds of ECG displayed at once
+    EXPORT_WIDTH: 1200,        // Default export image width
+    EXPORT_HEIGHT: 600         // Default export image height
+};
+
 class ECGRenderer {
     constructor(canvasId) {
         this.canvas = document.getElementById(canvasId);
         this.ctx = this.canvas.getContext('2d');
         this.setupCanvas();
+        
+        // Configuration
+        this.samplingRate = ECG_CONFIG.SAMPLING_RATE;
+        this.displaySeconds = ECG_CONFIG.DISPLAY_SECONDS;
         
         // Drag state
         this.isDragging = false;
@@ -79,8 +91,7 @@ class ECGRenderer {
         this.lastDragX = x;
         
         // Convert pixel delta to time delta (negative = go back in time)
-        // Assuming 5 seconds displayed across the canvas width
-        const secondsPerPixel = 5 / this.width;
+        const secondsPerPixel = this.displaySeconds / this.width;
         const deltaSeconds = -deltaX * secondsPerPixel;
         
         if (this.onDragCallback && Math.abs(deltaSeconds) > 0.01) {
@@ -233,13 +244,14 @@ class ECGRenderer {
             timestamp = new Date().toISOString(),
             modelName = 'ECG Model',
             showGrid = true,
-            format = 'png'  // 'png' or 'jpeg'
+            format = 'png',  // 'png' or 'jpeg'
+            exportWidth = ECG_CONFIG.EXPORT_WIDTH,
+            exportHeight = ECG_CONFIG.EXPORT_HEIGHT,
+            samplingRate = ECG_CONFIG.SAMPLING_RATE
         } = options;
         
         // Create a new canvas for export (larger, white background for print)
         const exportCanvas = document.createElement('canvas');
-        const exportWidth = 1200;
-        const exportHeight = 600;
         exportCanvas.width = exportWidth;
         exportCanvas.height = exportHeight;
         const ctx = exportCanvas.getContext('2d');
@@ -399,11 +411,11 @@ class ECGRenderer {
         ctx.fillStyle = '#333333';
         ctx.fillText('False Detection', 300, legendY);
         
-        // Time scale
-        const duration = samples.length / 360;  // Assuming 360 Hz sampling rate
+        // Time scale - use configurable sampling rate
+        const duration = samples.length / samplingRate;
         ctx.fillStyle = '#666666';
         ctx.font = '10px Arial';
-        ctx.fillText(`Duration: ${duration.toFixed(2)}s | Sampling Rate: 360 Hz`, graphX, graphY + graphHeight + 20);
+        ctx.fillText(`Duration: ${duration.toFixed(2)}s | Sampling Rate: ${samplingRate} Hz`, graphX, graphY + graphHeight + 20);
         
         // Footer
         ctx.fillStyle = '#999999';
