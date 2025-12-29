@@ -463,7 +463,36 @@ b.  *Early Stopping :* Proses training akan dihentikan secara otomatis
     jika tidak terjadi peningkatan kinerja pada data validasi selama 15
     epoch. Mekanisme ini krusial untuk mencegah terjadinya overfitting.
 
-**3.6.2 Skenario Pengujian Sistem**
+c.  *Gradient Clipping :* Untuk mencegah *exploding gradients* yang dapat
+    mengganggu stabilitas pelatihan, diterapkan pembatasan norm gradien
+    dengan nilai maksimum 1.0. Teknik ini memastikan pembaruan bobot tetap
+    dalam rentang yang wajar.
+
+d.  *Dropout :* Lapisan Dropout dengan probabilitas 0.5 diterapkan pada
+    classifier head untuk mencegah overfitting dengan cara menonaktifkan
+    sebagian neuron secara acak selama pelatihan.
+
+**3.6.2 Arsitektur Model Context-Aware CNN1D**
+
+Model CNN1D yang digunakan memiliki arsitektur sebagai berikut:
+
+1.  **Layer Input**: Menerima input dengan dimensi (7, 200), di mana 7 adalah
+    jumlah detak dalam jendela konteks dan 200 adalah jumlah sampel per detak.
+
+2.  **Blok Konvolusi Pertama**: Conv1D(7→32, kernel=3) + BatchNorm + ReLU + MaxPool(2)
+
+3.  **Blok Konvolusi Kedua**: Conv1D(32→64, kernel=5) + BatchNorm + ReLU + MaxPool(2)
+
+4.  **Blok Konvolusi Ketiga**: Conv1D(64→128, kernel=7) + BatchNorm + ReLU + MaxPool(2)
+
+5.  **Global Average Pooling**: Mereduksi dimensi spasial menjadi vektor 128-dimensi
+
+6.  **Classifier**: Linear(128→64) + ReLU + Dropout(0.5) + Linear(64→2)
+
+Total parameter model adalah sekitar 77,314, yang relatif kecil dan memungkinkan
+inferensi cepat pada perangkat dengan sumber daya terbatas.
+
+**3.6.3 Skenario Pengujian Sistem**
 
 > Selain evaluasi menggunakan data uji, validasi model ini diperkuat
 > dengan simulasi system pada bagian *frontend.* Pengujian ini akan
@@ -504,11 +533,47 @@ b.  *Early Stopping :* Proses training akan dihentikan secara otomatis
     kecepatan eksekusi yang lebih tinggi dibandingkan memuat *training
     library* secara utuh, sehingga lebih optimal untuk *deployment.*
 
+4.  Perhitungan BPM (*Beats Per Minute*) : Sistem menghitung denyut jantung
+    per menit berdasarkan rata-rata interval R-R dari 10 detak terakhir.
+    Interval yang tidak valid (menghasilkan BPM di luar rentang 30-200)
+    diabaikan untuk menjaga stabilitas pembacaan.
+
+5.  Penanganan Kecepatan Tinggi : Untuk mencegah masalah pada simulasi 
+    kecepatan tinggi (10x), sistem menerapkan:
+    - Flag `isClassifying` untuk mencegah request klasifikasi bersamaan
+    - Set `processedBeats` untuk melacak detak yang sudah diproses
+    - Pembatasan ukuran array untuk mencegah pertumbuhan memori
+
 > **3.7.2 Visualisasi Frontend**
 >
 > Komponen frontend bertugas untuk menampilkan hasil analisis komputasi
 > menjadi informasi visual yang interaktif bagi pengguna medis. Fitur
-> utama dari antarmuka mekiputi:
+> utama dari antarmuka meliputi:
+
+1.  **Grafik Sinyal ECG Real-Time**: Menampilkan sinyal ECG yang bergerak
+    dari kiri ke kanan dengan penanda R-peak dan klasifikasi. Grafik ini
+    mendukung fitur *drag-to-scroll* untuk navigasi ke histori sinyal.
+
+2.  **Beat Snapshot**: Panel terpisah yang menampilkan bentuk detak jantung
+    saat ini yang dikirim ke model ONNX, lengkap dengan penanda R-peak
+    pada posisi yang tepat (sampel ke-90 untuk model v6).
+
+3.  **Statistik Real-Time**: Panel yang menampilkan:
+    - Total detak yang terdeteksi
+    - Jumlah detak normal dan abnormal
+    - Akurasi prediksi (dibandingkan dengan anotasi)
+    - Denyut jantung (BPM)
+
+4.  **Kontrol Kecepatan**: Preset kecepatan 0.1x, 0.5x, 1x, 5x, dan 10x
+    untuk simulasi berbagai skenario pengujian.
+
+5.  **Log Deteksi Salah**: Panel khusus yang mencatat setiap prediksi yang
+    tidak sesuai dengan anotasi ground truth, dengan kemampuan klik untuk
+    navigasi ke posisi tersebut pada grafik.
+
+6.  **Ekspor Gambar Medis**: Tombol untuk mengekspor grafik ECG ke format
+    PNG atau JPEG dengan tampilan medis standar (latar putih, grid merah,
+    header informasi model dan timestamp).
 
 **3.8 Perancangan Fungsional Sistem (*Use Case*)**
 

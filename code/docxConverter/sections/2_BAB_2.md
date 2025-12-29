@@ -570,7 +570,118 @@ Fenomena *distribution shift* terjadi ketika distribusi kelas pada data validasi
    - Penggunaan class weights yang dinamis
    - Validasi pada data yang benar-benar tidak terlihat (seperti record 119 yang dikecualikan dari training)
 
-**2.11 *Open Neural Network Exchange* (ONNX)**
+**2.11 Arsitektur Context-Aware CNN1D untuk Klasifikasi ECG**
+
+Arsitektur Context-Aware CNN1D yang digunakan dalam penelitian ini dirancang khusus untuk mengekstraksi fitur dari jendela konteks 7 detak jantung. Berbeda dengan CNN1D konvensional yang memproses sinyal ECG secara keseluruhan, pendekatan ini memperlakukan setiap detak dalam jendela konteks sebagai kanal input terpisah.
+
+**2.11.1 Struktur Layer Konvolusi**
+
+Model terdiri dari tiga blok konvolusi berurutan dengan jumlah filter yang meningkat:
+
+1. **Blok Konvolusi 1**: 
+   - Input: 7 kanal × 200 sampel (7 detak)
+   - Conv1D: 32 filter, kernel size 3, padding 1
+   - BatchNorm1D(32)
+   - ReLU activation
+   - MaxPool1D(2) → Output: 32 × 100
+
+2. **Blok Konvolusi 2**:
+   - Conv1D: 64 filter, kernel size 5, padding 2
+   - BatchNorm1D(64)
+   - ReLU activation
+   - MaxPool1D(2) → Output: 64 × 50
+
+3. **Blok Konvolusi 3**:
+   - Conv1D: 128 filter, kernel size 7, padding 3
+   - BatchNorm1D(128)
+   - ReLU activation
+   - MaxPool1D(2) → Output: 128 × 25
+
+**2.11.2 Global Average Pooling**
+
+Setelah layer konvolusi, *Global Average Pooling* diterapkan untuk mereduksi dimensi spasial menjadi vektor fitur berdimensi 128. Teknik ini lebih robust dibandingkan *Flatten* tradisional karena:
+
+1. Mengurangi jumlah parameter secara signifikan
+2. Mencegah *overfitting*
+3. Memberikan invariansi terhadap translasi kecil dalam sinyal
+
+**2.11.3 Classifier Head**
+
+Classifier terdiri dari:
+- Linear: 128 → 64
+- ReLU activation
+- Dropout(0.5)
+- Linear: 64 → 2 (output classes)
+
+Total parameter model adalah sekitar 77,314, yang relatif kecil dan memungkinkan inferensi cepat pada perangkat dengan sumber daya terbatas.
+
+**2.11.4 Alasan Pemilihan Arsitektur**
+
+Arsitektur ini dipilih karena:
+1. **Efisiensi**: Parameter yang relatif sedikit memungkinkan training dan inferensi cepat
+2. **Konteks Temporal**: Memperlakukan 7 detak sebagai 7 kanal memungkinkan model mempelajari hubungan antar-detak
+3. **Hierarki Fitur**: Kernel size yang berbeda (3, 5, 7) menangkap pola pada skala temporal yang berbeda
+
+**2.12 Teknik Anti-Overfitting dalam Deep Learning**
+
+Overfitting adalah masalah umum dalam deep learning di mana model terlalu menyesuaikan diri dengan data pelatihan sehingga tidak dapat mengeneralisasi ke data baru. Beberapa teknik anti-overfitting yang diterapkan dalam penelitian ini:
+
+**2.12.1 Dropout**
+
+Dropout adalah teknik regularisasi di mana sebagian neuron dinonaktifkan secara acak selama pelatihan dengan probabilitas $p$. Dalam penelitian ini, $p = 0.5$ digunakan pada classifier head. Secara matematis, output neuron dengan dropout diberikan oleh:
+
+$$y_i = r_i \cdot a_i, \quad r_i \sim \text{Bernoulli}(1-p)$$
+
+di mana $a_i$ adalah aktivasi asli dan $r_i$ adalah variabel acak Bernoulli (Srivastava et al., 2014).
+
+**2.12.2 Batch Normalization**
+
+Batch Normalization menormalisasi input setiap layer dengan statistik mini-batch selama pelatihan:
+
+$$\hat{x} = \frac{x - \mu_B}{\sqrt{\sigma_B^2 + \epsilon}}$$
+
+di mana $\mu_B$ dan $\sigma_B^2$ adalah rata-rata dan varians mini-batch. Teknik ini mempercepat konvergensi dan memiliki efek regularisasi ringan (Ioffe & Szegedy, 2015).
+
+**2.12.3 Weight Decay (L2 Regularization)**
+
+Weight Decay menambahkan penalti pada loss function berdasarkan magnitude bobot:
+
+$$L_{total} = L_{CE} + \lambda \sum_{i} w_i^2$$
+
+di mana $L_{CE}$ adalah Cross-Entropy Loss, $\lambda$ adalah koefisien regularisasi (0.0001 dalam penelitian ini), dan $w_i$ adalah bobot model.
+
+**2.12.4 Gradient Clipping**
+
+Gradient Clipping membatasi norm gradien untuk mencegah *exploding gradients*:
+
+$$g' = \min\left(1, \frac{\theta}{||g||}\right) \cdot g$$
+
+di mana $\theta$ adalah threshold (1.0 dalam penelitian ini) dan $g$ adalah vektor gradien.
+
+**2.13 AdamW Optimizer**
+
+AdamW adalah varian dari Adam optimizer yang memisahkan weight decay dari pembaruan gradien (Loshchilov & Hutter, 2019). Pembaruan parameter diberikan oleh:
+
+$$m_t = \beta_1 m_{t-1} + (1 - \beta_1) g_t$$
+$$v_t = \beta_2 v_{t-1} + (1 - \beta_2) g_t^2$$
+$$\hat{m}_t = \frac{m_t}{1 - \beta_1^t}, \quad \hat{v}_t = \frac{v_t}{1 - \beta_2^t}$$
+$$w_t = w_{t-1} - \eta \left( \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} + \lambda w_{t-1} \right)$$
+
+AdamW lebih efektif daripada Adam standar karena weight decay yang terpisah menghasilkan generalisasi yang lebih baik pada model deep learning.
+
+**2.14 Area Under the Curve - Receiver Operating Characteristic (AUC-ROC)**
+
+AUC-ROC adalah metrik evaluasi yang mengukur kemampuan model dalam membedakan antara kelas positif dan negatif pada berbagai threshold. Kurva ROC memplot:
+- *True Positive Rate* (TPR/Recall) pada sumbu y
+- *False Positive Rate* (FPR) pada sumbu x
+
+AUC-ROC memiliki nilai antara 0 dan 1, di mana:
+- 0.5 = Random classifier
+- 1.0 = Perfect classifier
+
+AUC-ROC lebih informatif daripada akurasi untuk dataset tidak seimbang karena mempertimbangkan seluruh range threshold keputusan.
+
+**2.15 *Open Neural Network Exchange* (ONNX)**
 
 Dalam pengembangan model *machine learning,* seringkali terdapat
 kebutuhan untuk memindahkan model dari data training ke *deployment*

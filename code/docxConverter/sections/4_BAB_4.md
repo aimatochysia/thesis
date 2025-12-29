@@ -215,3 +215,28 @@ https://doi.org/10.1161/01.CIR.101.23.e215
 Pan, J., & Tompkins, W. J. (1985). *A real-time QRS detection algorithm.
 IEEE Transactions on Biomedical Engineering,* BME-32(3), 230--236.
 https://doi.org/10.1109/TBME.1985.325532
+
+Srivastava, N., Hinton, G., Krizhevsky, A., Sutskever, I., & Salakhutdinov, R.
+(2014). *Dropout: A simple way to prevent neural networks from overfitting.
+Journal of Machine Learning Research,* 15(1), 1929--1958.
+
+Ioffe, S., & Szegedy, C. (2015). *Batch normalization: Accelerating deep
+network training by reducing internal covariate shift.* Proceedings of the
+32nd International Conference on Machine Learning (ICML), 448--456.
+
+Loshchilov, I., & Hutter, F. (2019). *Decoupled weight decay regularization.*
+International Conference on Learning Representations (ICLR).
+https://arxiv.org/abs/1711.05101
+
+Kingma, D. P., & Ba, J. (2015). *Adam: A method for stochastic optimization.*
+International Conference on Learning Representations (ICLR).
+https://arxiv.org/abs/1412.6980
+
+LeCun, Y., Bengio, Y., & Hinton, G. (2015). *Deep learning.* Nature, 521(7553),
+436--444. https://doi.org/10.1038/nature14539
+
+Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning.* MIT Press.
+
+Prechelt, L. (1998). *Early stopping - but when?* Neural Networks: Tricks of
+the Trade. Lecture Notes in Computer Science, vol 1524. Springer, Berlin.
+https://doi.org/10.1007/3-540-49430-8_3
