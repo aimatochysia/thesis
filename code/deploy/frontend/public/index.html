@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ECG Real-Time Classification</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>🫀 ECG Real-Time Classification Monitor</h1>
+        <p class="subtitle">
+            Using PyTorch ONNX Model: <span id="modelName" class="model-badge">Loading...</span>
+        </p>
+        
+        <!-- Controls -->
+        <div class="controls">
+            <button id="startBtn" class="btn btn-start" onclick="startSimulation()">▶ Start</button>
+            <button id="stopBtn" class="btn btn-stop" onclick="stopSimulation()">⏹ Stop</button>
+            <button id="resetBtn" class="btn btn-reset" onclick="resetSimulation()">🔄 Reset</button>
+            <div class="speed-control">
+                <span>Speed:</span>
+                <button class="speed-btn" onclick="setSpeed(0.1)">0.1x</button>
+                <button class="speed-btn" onclick="setSpeed(0.5)">0.5x</button>
+                <button class="speed-btn active" onclick="setSpeed(1)">1x</button>
+                <button class="speed-btn" onclick="setSpeed(5)">5x</button>
+                <button class="speed-btn" onclick="setSpeed(10)">10x</button>
+                <span id="speedValue">1x</span>
+            </div>
+        </div>
+        
+        <!-- Stats Bar -->
+        <div class="stats-bar">
+            <div class="stat-item">
+                <div class="stat-value" id="totalBeats">0</div>
+                <div class="stat-label">Total Beats</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value normal" id="normalBeats">0</div>
+                <div class="stat-label">Normal</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value abnormal" id="abnormalBeats">0</div>
+                <div class="stat-label">Abnormal</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="accuracy">--</div>
+                <div class="stat-label">Accuracy</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="heartRate">--</div>
+                <div class="stat-label">BPM</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value false" id="falseCount">0</div>
+                <div class="stat-label">False Predictions</div>
+            </div>
+        </div>
+        
+        <!-- ECG Graph Container -->
+        <div class="ecg-container">
+            <canvas id="ecgCanvas"></canvas>
+            <div class="time-display">
+                Time: <span id="currentTime">0:00.000</span>
+                <span id="historyIndicator" class="history-indicator" style="display: none;">📜 Viewing History</span>
+            </div>
+            <div class="nav-controls">
+                <button class="nav-btn" onclick="scrollHistory(-5)">⏪ -5s</button>
+                <button class="nav-btn" onclick="scrollHistory(-1)">◀ -1s</button>
+                <button class="nav-btn live" id="liveBtn" onclick="goToLive()">🔴 Live</button>
+                <button class="nav-btn" id="fwdBtn" onclick="scrollHistory(1)" disabled>▶ +1s</button>
+                <button class="nav-btn" id="fwd5Btn" onclick="scrollHistory(5)" disabled>⏩ +5s</button>
+                <span class="nav-separator">|</span>
+                <button class="nav-btn export" onclick="exportECG('png')">📷 Export PNG</button>
+                <button class="nav-btn export" onclick="exportECG('jpeg')">📄 Export JPEG</button>
+            </div>
+            <p class="drag-hint">💡 Drag the graph to scroll through history</p>
+        </div>
+        
+        <!-- Beat Snapshot Container -->
+        <div class="beat-snapshot-container">
+            <h3 class="section-title">💓 Current Beat Snapshot (Input to ONNX Model)</h3>
+            <div class="beat-snapshot-content">
+                <div class="beat-canvas-wrapper">
+                    <canvas id="beatCanvas"></canvas>
+                </div>
+                <div class="beat-info-panel">
+                    <div class="info-item">
+                        <div class="info-label">Beat Type (Annotation)</div>
+                        <div id="beatTypeDisplay" class="info-value">--</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Ground Truth</div>
+                        <div id="groundTruthDisplay" class="info-value">--</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Model Prediction</div>
+                        <div id="predictionDisplay" class="info-value">--</div>
+                    </div>
+                </div>
+            </div>
+            <div class="beat-description">
+                <span id="beatSamplesInfo">-- samples extracted around R-peak</span> → Normalized with scaler → Fed to ONNX model → Output: 0=Normal, 1=Abnormal
+            </div>
+        </div>
+        
+        <!-- Results Container -->
+        <div class="results-container">
+            <div class="panel">
+                <h3>📊 Current Classification</h3>
+                <div class="current-beat">
+                    <div class="label">Latest Heartbeat Status</div>
+                    <div class="value" id="currentStatus">Waiting...</div>
+                    <div class="probability-bar">
+                        <div class="probability-fill" id="probBar"></div>
+                    </div>
+                    <div id="probText" class="prob-text">Abnormal Probability: --</div>
+                </div>
+            </div>
+            
+            <div class="panel">
+                <h3>📋 Classification History</h3>
+                <div class="classification-list" id="classificationList">
+                    <p class="placeholder-text">No classifications yet. Start the simulation!</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- False Detections Panel -->
+        <div class="panel false-detections-panel">
+            <h3>⚠️ False Detections</h3>
+            <div class="classification-list" id="falseDetectionList">
+                <p class="placeholder-text">No false detections yet.</p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/js/ecgRenderer.js"></script>
+    <script src="/js/beatRenderer.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/app.js"></script>
+</body>
+</html>

@@ -6,8 +6,8 @@ What this script does:
 - Applies low-compute preprocessing (bandpass + optional notch), Pan–Tompkins-like R-peak detection.
 - Maintains RR history and uses RR-adaptive windows with sensible clamps to segment single beats.
 - Resamples each segmented beat to match the model's expected input length (188).
-- Normalizes beats to match the training distribution (baseline ~950 as per repo README notes).
-- Loads a classification model (Keras .h5 or scikit-learn .pkl) and predicts per-beat normal/abnormal.
+- Normalizes beats to match the training distribution.
+- Loads a classification model (PyTorch ONNX, Keras .h5, or scikit-learn .pkl) and predicts per-beat normal/abnormal.
 - Produces plots:
   - Continuous signal with detected R-peaks and segmented beat windows.
   - A grid of beats showing the model's prediction per beat.
@@ -15,13 +15,15 @@ What this script does:
 
 Dependencies:
 - numpy, scipy, pandas, matplotlib
+- onnxruntime (for PyTorch ONNX models - recommended)
 - tensorflow (for .h5 Keras models), or scikit-learn + joblib (for .pkl models)
+
+Usage with PyTorch ONNX models:
+    python deployment.py --input_csv data/ecg.csv --onnx_model sample/ecg_lstm_v3_pytorch_final.onnx \\
+                         --scaler sample/scaler_v3_pytorch.pkl --model_version v3
 
 Notes and assumptions:
 - Sampling rate fs should be known or provided. If unknown, the script assumes fs=360 Hz (common in datasets).
-- The training baseline in the README mentions around 958. You can set a target baseline to 950 as requested,
-  and normalize beats to be centered near this value before feeding the model if that matches training.
-- If your v2 model expects a specific normalization (e.g., mean/std), adjust NORMALIZE_MODE and parameters below.
 - This script is intended for offline replay with real-time emulation (sleep disabled by default, configurable).
 - For very long datasets, the plotting functions downsample to keep figures responsive.
 """
@@ -86,8 +88,8 @@ CONFIG = {
 
     # Model input normalization and resampling
     "model_input_len": 188,       # expected input length for v2 (and others)
-    "target_baseline": 950.0,     # center beats near this baseline (from README ~958; requested ~950)
-    "NORMALIZE_MODE": "baseline_shift_scale",  # "baseline_shift_scale" or "per_beat_standardize" or "none"
+    "target_baseline": 950.0,     # center beats near this baseline
+    "NORMALIZE_MODE": "per_beat_standardize",  # "baseline_shift_scale" or "per_beat_standardize" or "none"
     "global_scale": 100.0,        # scale divisor after baseline shift; adjust to match training
     "per_beat_eps": 1e-6,
 
@@ -97,9 +99,12 @@ CONFIG = {
     "enable_sliding_window_fallback": True,
     "fallback_stride_samples": 32,
 
-    # Classification model paths
-    "keras_h5_path": None,        # e.g., "models/v2_cnn.h5"
-    "sklearn_pkl_path": None,     # e.g., "models/ensemble.pkl"
+    # Classification model paths (ONNX is now preferred)
+    "onnx_path": None,            # e.g., "sample/ecg_lstm_v3_pytorch_final.onnx"
+    "scaler_path": None,          # e.g., "sample/scaler_v3_pytorch.pkl"
+    "model_version": "v3",        # v2, v3, or v5
+    "keras_h5_path": None,        # e.g., "models/v2_cnn.h5" (legacy)
+    "sklearn_pkl_path": None,     # e.g., "models/ensemble.pkl" (legacy)
 
     # Output/reporting
     "output_csv_path": "outputs/per_beat_predictions.csv",
@@ -335,13 +340,54 @@ def normalize_beat(x: np.ndarray, mode: str, target_baseline: float, global_scal
 # Model loading and prediction
 # -------------------------------
 
+# ONNX Runtime import for PyTorch ONNX models
+try:
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ort = None
+    ONNX_AVAILABLE = False
+
+# Model configurations for PyTorch ONNX models
+MODEL_CONFIGS = {
+    'v2': {
+        'name': 'CNN (v2)',
+        'onnx_file': 'ecg_cnn_v2_pytorch_final.onnx',
+        'scaler_file': 'scaler_v2_pytorch.pkl',
+        'input_shape': (1, 1, 188),  # CNN: (batch, channels, length)
+    },
+    'v3': {
+        'name': 'LSTM (v3)',
+        'onnx_file': 'ecg_lstm_v3_pytorch_final.onnx',
+        'scaler_file': 'scaler_v3_pytorch.pkl',
+        'input_shape': (1, 188, 1),  # LSTM: (batch, timesteps, features)
+    },
+    'v5': {
+        'name': 'Transformer (v5)',
+        'onnx_file': 'ecg_transformer_v5_pytorch_final.onnx',
+        'scaler_file': 'scaler_v5_pytorch.pkl',
+        'input_shape': (1, 188, 1),  # Transformer: (batch, timesteps, features)
+    },
+}
+
+
 class BeatClassifier:
-    def __init__(self, keras_h5_path: Optional[str], sklearn_pkl_path: Optional[str]):
+    def __init__(self, keras_h5_path: Optional[str] = None, sklearn_pkl_path: Optional[str] = None,
+                 onnx_path: Optional[str] = None, onnx_input_shape: Optional[Tuple] = None,
+                 scaler_path: Optional[str] = None):
         self.keras_model = None
         self.sklearn_model = None
+        self.onnx_session = None
+        self.onnx_input_shape = onnx_input_shape
+        self.scaler = None
         self.model_type = None
 
-        if keras_h5_path and tf is not None and os.path.isfile(keras_h5_path):
+        # Priority: ONNX > Keras > sklearn
+        if onnx_path and ONNX_AVAILABLE and os.path.isfile(onnx_path):
+            self.onnx_session = ort.InferenceSession(onnx_path)
+            self.model_type = "onnx"
+            print(f"Loaded ONNX model from: {onnx_path}")
+        elif keras_h5_path and tf is not None and os.path.isfile(keras_h5_path):
             self.keras_model = tf.keras.models.load_model(keras_h5_path)
             self.model_type = "keras"
         elif sklearn_pkl_path and joblib is not None and os.path.isfile(sklearn_pkl_path):
@@ -349,12 +395,49 @@ class BeatClassifier:
             self.model_type = "sklearn"
         else:
             raise RuntimeError("No valid model file found or required libraries not available.")
+        
+        # Load scaler if provided
+        if scaler_path and joblib is not None and os.path.isfile(scaler_path):
+            self.scaler = joblib.load(scaler_path)
+            print(f"Loaded scaler from: {scaler_path}")
 
-    def predict_proba(self, beat_188: np.ndarray) -> float:
+    def preprocess_beat(self, beat_188: np.ndarray) -> np.ndarray:
+        """
+        Apply scaler transformation if available.
+        """
+        if self.scaler is not None:
+            # Use the scaler fitted on training data
+            beat_2d = beat_188.reshape(1, -1)
+            return self.scaler.transform(beat_2d).flatten().astype(np.float32)
+        return beat_188.astype(np.float32)
+
+    def predict_proba(self, beat_188: np.ndarray, use_scaler: bool = True) -> float:
         """
         Returns probability of abnormal class (1).
+        If use_scaler=True and scaler is available, applies scaler first.
         """
-        if self.model_type == "keras":
+        # Apply scaler if requested and available
+        if use_scaler and self.scaler is not None:
+            beat_188 = self.preprocess_beat(beat_188)
+        
+        if self.model_type == "onnx":
+            # Reshape according to model-specific input shape
+            if self.onnx_input_shape:
+                x = beat_188.reshape(self.onnx_input_shape).astype(np.float32)
+            else:
+                # Default: assume LSTM/Transformer shape
+                x = beat_188.reshape(1, -1, 1).astype(np.float32)
+            
+            input_name = self.onnx_session.get_inputs()[0].name
+            output_name = self.onnx_session.get_outputs()[0].name
+            proba = self.onnx_session.run([output_name], {input_name: x})[0]
+            
+            # Handle 2-class output from PyTorch models
+            if proba.shape[1] == 2:
+                return float(proba[0, 1])
+            else:
+                return float(proba[0, 0])
+        elif self.model_type == "keras":
             # Expect shape (1, 188, 1) for Conv1D-based models
             x = beat_188.reshape(1, -1, 1).astype(np.float32)
             prob = float(self.keras_model.predict(x, verbose=0).squeeze())
@@ -496,8 +579,13 @@ def emulate_stream_and_classify(
                 eps=config["per_beat_eps"]
             )
 
-            # Predict
-            prob_abnormal = classifier.predict_proba(beat_norm)
+            # Predict - if classifier has scaler, pass raw beat; otherwise use normalized
+            if hasattr(classifier, 'scaler') and classifier.scaler is not None:
+                # Use scaler in classifier (PyTorch ONNX models)
+                prob_abnormal = classifier.predict_proba(beat_188, use_scaler=True)
+            else:
+                # Use manual normalization
+                prob_abnormal = classifier.predict_proba(beat_norm, use_scaler=False)
             label = int(prob_abnormal >= 0.5)
 
             # Store results
@@ -624,12 +712,22 @@ def save_results_csv(results: Dict, config: Dict):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="ECG streaming-to-beat deployment pipeline")
+    parser = argparse.ArgumentParser(description="ECG streaming-to-beat deployment pipeline with PyTorch ONNX models")
     parser.add_argument("--input_csv", type=str, required=True, help="Path to continuous ECG CSV file")
     parser.add_argument("--ecg_column", type=str, default=None, help="Column name containing ECG values (default: first numeric col)")
     parser.add_argument("--fs", type=int, default=CONFIG["fs"], help="Sampling rate (Hz)")
-    parser.add_argument("--keras_h5", type=str, default=None, help="Path to Keras .h5 model")
-    parser.add_argument("--sklearn_pkl", type=str, default=None, help="Path to scikit-learn .pkl model")
+    
+    # Model options (ONNX preferred)
+    parser.add_argument("--onnx_model", type=str, default=None, help="Path to PyTorch ONNX model (e.g., sample/ecg_lstm_v3_pytorch_final.onnx)")
+    parser.add_argument("--scaler", type=str, default=None, help="Path to scaler pickle (e.g., sample/scaler_v3_pytorch.pkl)")
+    parser.add_argument("--model_version", type=str, default="v3", choices=["v2", "v3", "v5"],
+                        help="Model version for input shape: v2 (CNN), v3 (LSTM), v5 (Transformer)")
+    
+    # Legacy model options
+    parser.add_argument("--keras_h5", type=str, default=None, help="Path to Keras .h5 model (legacy)")
+    parser.add_argument("--sklearn_pkl", type=str, default=None, help="Path to scikit-learn .pkl model (legacy)")
+    
+    # Output options
     parser.add_argument("--output_csv", type=str, default=CONFIG["output_csv_path"], help="Output CSV path")
     parser.add_argument("--plots_dir", type=str, default=CONFIG["plots_dir"], help="Directory to save plots")
     parser.add_argument("--normalize_mode", type=str, default=CONFIG["NORMALIZE_MODE"],
@@ -643,6 +741,9 @@ def main():
     CONFIG["input_csv_path"] = args.input_csv
     CONFIG["ecg_column"] = args.ecg_column
     CONFIG["fs"] = args.fs
+    CONFIG["onnx_path"] = args.onnx_model
+    CONFIG["scaler_path"] = args.scaler
+    CONFIG["model_version"] = args.model_version
     CONFIG["keras_h5_path"] = args.keras_h5
     CONFIG["sklearn_pkl_path"] = args.sklearn_pkl
     CONFIG["output_csv_path"] = args.output_csv
@@ -655,10 +756,21 @@ def main():
     # Load signal
     signal = load_signal_from_csv(CONFIG["input_csv_path"], CONFIG["ecg_column"])
 
-    # Load classifier
+    # Get model input shape if using ONNX
+    onnx_input_shape = None
+    if args.onnx_model:
+        # Only set input shape when actually using an ONNX model
+        model_version = args.model_version or 'v3'
+        if model_version in MODEL_CONFIGS:
+            onnx_input_shape = MODEL_CONFIGS[model_version]['input_shape']
+
+    # Load classifier (ONNX preferred, fallback to Keras/sklearn)
     classifier = BeatClassifier(
         keras_h5_path=CONFIG["keras_h5_path"],
-        sklearn_pkl_path=CONFIG["sklearn_pkl_path"]
+        sklearn_pkl_path=CONFIG["sklearn_pkl_path"],
+        onnx_path=CONFIG["onnx_path"],
+        onnx_input_shape=onnx_input_shape,
+        scaler_path=CONFIG["scaler_path"]
     )
 
     # Run pipeline

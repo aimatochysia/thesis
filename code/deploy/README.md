@@ -2,97 +2,111 @@
 
 ## Overview
 
-This is a web-based real-time ECG monitoring and classification system that uses an LSTM neural network model for heartbeat classification. The application has been refactored to support cross-platform deployment without requiring heavy TensorFlow/Keras dependencies.
+This is a web-based real-time ECG monitoring and classification system that uses PyTorch ONNX models (CNN, LSTM, or Transformer) for heartbeat classification. The application supports cross-platform deployment using lightweight ONNX Runtime inference.
 
 ## Key Features
 
+- ✅ **Multiple Models**: Choose between CNN (v2), LSTM (v3), or Transformer (v5)
+- ✅ **PyTorch ONNX**: Uses PyTorch models exported to ONNX format
 - ✅ **Cross-platform**: Works on Windows, Linux, and macOS
 - ✅ **Lightweight deployment**: Uses ONNX Runtime (10MB) instead of TensorFlow (500MB+)
 - ✅ **Real-time visualization**: Interactive ECG signal display
 - ✅ **Live classification**: Classifies heartbeats as Normal or Abnormal
-- ✅ **Performance metrics**: Tracks accuracy, BPM, and classification statistics
+- ✅ **No Data Leakage**: Scalers fit only on training data
 
-## Architecture
+## Available Models
 
-The application supports two runtime modes:
-
-1. **ONNX Runtime Mode** (Recommended) - Keras-free inference
-   - Requires: `onnxruntime` (~10MB)
-   - Fast, lightweight, cross-platform
-   - No TensorFlow/Keras needed
-
-2. **TensorFlow/Keras Mode** (Fallback)
-   - Requires: `tensorflow` (~500MB)
-   - Used when ONNX model is not available
+| Version | Model Type | Architecture | ONNX File | Scaler File |
+|---------|-----------|--------------|-----------|-------------|
+| v2 | CNN | 4-layer Conv1D + BatchNorm | `ecg_cnn_v2_pytorch_final.onnx` | `scaler_v2_pytorch.pkl` |
+| v3 | LSTM | Bidirectional LSTM | `ecg_lstm_v3_pytorch_final.onnx` | `scaler_v3_pytorch.pkl` |
+| v5 | Transformer | 3-layer, 4-head attention | `ecg_transformer_v5_pytorch_final.onnx` | `scaler_v5_pytorch.pkl` |
 
 ## Installation
-
-### Option 1: ONNX Runtime Mode (Recommended)
 
 ```bash
 # Install minimal dependencies
 pip install onnxruntime numpy pandas flask joblib scikit-learn
 
-# Run the application
+# Navigate to deploy directory
 cd code/deploy
-python realtime_frontend.py
 ```
 
-**Note**: You need to convert the H5 model to ONNX first. See [ONNX Conversion Guide](README_ONNX_CONVERSION.md).
+## Quick Start
 
-### Option 2: TensorFlow/Keras Mode (Fallback)
+### Real-Time Frontend
 
 ```bash
-# Install TensorFlow and dependencies
-pip install tensorflow numpy pandas flask joblib scikit-learn
-
-# Run the application
-cd code/deploy
+# Run with default LSTM model (v3)
 python realtime_frontend.py
+
+# Run with specific model
+python realtime_frontend.py --model v2    # CNN
+python realtime_frontend.py --model v3    # LSTM (default)
+python realtime_frontend.py --model v5    # Transformer
+
+# Run on different port
+python realtime_frontend.py --model v3 --port 8080
+```
+
+Then open http://localhost:5000 in your browser.
+
+### Batch Deployment Pipeline
+
+```bash
+python deployment.py --input_csv your_ecg_data.csv \
+    --onnx_model sample/ecg_lstm_v3_pytorch_final.onnx \
+    --scaler sample/scaler_v3_pytorch.pkl \
+    --model_version v3
 ```
 
 ## File Structure
 
 ```
 code/deploy/
-├── realtime_frontend.py          # Main application (ONNX/Keras support)
-├── deployment.py                  # Alternative deployment script
+├── realtime_frontend.py          # Real-time web interface (ONNX)
+├── deployment.py                  # Batch deployment pipeline (ONNX)
 ├── classify_heartbeats.py         # Heartbeat classification utility
 ├── convert_ecg_data.py            # Data conversion utility
-├── convert_to_onnx_standalone.py # ONNX conversion script
 ├── README.md                      # This file
-├── README_ONNX_CONVERSION.md     # Detailed ONNX conversion guide
 └── sample/
     ├── 100.csv                    # Sample ECG data
     ├── 100annotations.txt         # Ground truth annotations
-    ├── ecg_lstm_final.h5          # Keras H5 model (v3 LSTM)
-    ├── ecg_lstm_final.onnx        # ONNX model (after conversion)
-    ├── ecg_lstm_v3_final.keras    # Alternative Keras format
-    └── scaler_v3.pkl              # StandardScaler for normalization
+    ├── ecg_cnn_v2_pytorch_final.onnx      # v2 CNN model (PyTorch)
+    ├── ecg_lstm_v3_pytorch_final.onnx     # v3 LSTM model (PyTorch)
+    ├── ecg_transformer_v5_pytorch_final.onnx # v5 Transformer model (PyTorch)
+    ├── scaler_v2_pytorch.pkl      # Scaler for v2 (fit on training data only)
+    ├── scaler_v3_pytorch.pkl      # Scaler for v3 (fit on training data only)
+    └── scaler_v5_pytorch.pkl      # Scaler for v5 (fit on training data only)
 ```
 
-## Usage
+## Usage Examples
 
-### Starting the Server
+### Starting the Real-Time Frontend
 
 ```bash
 cd code/deploy
-python realtime_frontend.py
+python realtime_frontend.py --model v3
 ```
 
 Expected output:
 ```
 ============================================================
 ECG Real-Time Classification Frontend
+Using PyTorch ONNX Models
 ============================================================
 
-Loading data...
-Loading ONNX model from: /path/to/ecg_lstm_final.onnx
-ONNX model loaded successfully (Keras-free inference)
+Selected model: V3
+Loading data and model...
+Loading LSTM (v3) model...
+Loading ONNX model from: sample/ecg_lstm_v3_pytorch_final.onnx
+✓ LSTM (v3) ONNX model loaded successfully
+✓ Scaler loaded from: sample/scaler_v3_pytorch.pkl
+
 Loaded 650000 ECG samples
 Loaded 2278 annotations
 
-Starting web server...
+Starting web server on port 5000...
 Open your browser and go to: http://localhost:5000
 
 Press Ctrl+C to stop the server
@@ -102,48 +116,42 @@ Press Ctrl+C to stop the server
 ### Using the Web Interface
 
 1. Open your browser to http://localhost:5000
-2. Click "▶ Start" to begin the real-time simulation
-3. Watch as the ECG signal scrolls and heartbeats are classified
-4. Adjust the speed slider to change simulation speed
-5. Click "⏹ Stop" to pause or "🔄 Reset" to restart
+2. The model name is displayed at the top (e.g., "CNN (v2)")
+3. Click "▶ Start" to begin the real-time simulation
+4. Watch as the ECG signal scrolls and heartbeats are classified
+5. Adjust the speed slider to change simulation speed
+6. Click "⏹ Stop" to pause or "🔄 Reset" to restart
 
 ## Model Information
 
-### v3 LSTM Model
+### Data Leakage Fix
 
-The application uses the v3 Bidirectional LSTM model:
+All models use scalers that were fit **only on training data** (not test data), ensuring realistic performance metrics:
+- Split data first (80% train, 10% val, 10% test)
+- Fit scaler on training data only
+- Transform validation/test using training statistics
 
-- **Input**: 188-sample ECG heartbeat segments
-- **Architecture**:
-  - Bidirectional LSTM (64 units) × 2 layers
-  - Batch Normalization
-  - Dropout (0.3)
-  - Dense layers (64 → 32 → 2)
-- **Output**: Binary classification (Normal vs Abnormal)
-- **Preprocessing**: StandardScaler normalization (scaler_v3.pkl)
+### Model Architectures
 
-### Model Files
+**v2 - CNN (Convolutional Neural Network)**
+- 4 Conv1D layers with BatchNorm
+- Dropout 0.5 for regularization
+- Input shape: (1, 188)
 
-- **ecg_lstm_final.h5**: Original Keras H5 format
-- **ecg_lstm_final.onnx**: ONNX format (convert manually)
-- **scaler_v3.pkl**: Preprocessing scaler (required)
+**v3 - LSTM (Long Short-Term Memory)**
+- Bidirectional LSTM (64 units) × 2 layers
+- Batch Normalization
+- Dropout 0.5
+- Input shape: (188, 1)
 
-## Converting to ONNX
-
-To use the lightweight ONNX Runtime mode, you need to convert the H5 model once:
-
-### Quick Conversion
-
-```bash
-cd code/deploy
-python convert_to_onnx_standalone.py
-```
-
-See [README_ONNX_CONVERSION.md](README_ONNX_CONVERSION.md) for detailed instructions and troubleshooting.
+**v5 - Transformer**
+- 3 Transformer encoder layers
+- 4-head multi-head attention
+- Learnable positional encoding
+- Input shape: (188, 1)
 
 ## Dependencies
 
-### Minimal (ONNX Mode)
 ```
 onnxruntime>=1.15.0
 numpy>=1.20.0
@@ -153,33 +161,6 @@ joblib>=1.0.0
 scikit-learn>=1.0.0
 ```
 
-### Full (Keras Mode)
-```
-tensorflow>=2.13.0
-numpy>=1.20.0
-pandas>=1.3.0
-flask>=2.0.0
-joblib>=1.0.0
-scikit-learn>=1.0.0
-```
-
-## Platform-Specific Notes
-
-### Windows
-- Install Python 3.8 or later
-- Use `python` instead of `python3`
-- ONNX Runtime works out of the box
-
-### Linux
-- Install Python 3.8 or later
-- May need to install system dependencies: `sudo apt-get install python3-dev`
-- ONNX Runtime works out of the box
-
-### macOS
-- Install Python 3.8 or later
-- ONNX Runtime supports both Intel and Apple Silicon
-- Use `python3` command
-
 ## Troubleshooting
 
 ### "No module named 'onnxruntime'"
@@ -188,95 +169,39 @@ pip install onnxruntime
 ```
 
 ### "ONNX model not found"
-The application will automatically fallback to TensorFlow/Keras if ONNX model is not available. To use ONNX mode, convert the model first:
+Ensure the model files exist in the `sample/` directory:
 ```bash
-python convert_to_onnx_standalone.py
+ls -la code/deploy/sample/*.onnx
 ```
 
-### "Error: Neither ONNXRuntime nor TensorFlow is available"
-Install one of them:
+### Model loading errors
+Check that the correct model version is specified:
 ```bash
-pip install onnxruntime  # Recommended
-# OR
-pip install tensorflow
+python realtime_frontend.py --model v3  # Not "V3" or "lstm"
 ```
-
-### Model loading is slow
-- First time loading with TensorFlow can take 5-10 seconds
-- ONNX Runtime loads much faster (<1 second)
-- Consider converting to ONNX for better performance
 
 ## Performance
 
-### ONNX Runtime vs TensorFlow/Keras
-
-| Metric | ONNX Runtime | TensorFlow/Keras |
-|--------|--------------|------------------|
-| Installation size | ~10 MB | ~500 MB |
-| Cold start time | <1 second | 3-5 seconds |
-| Inference time | ~3-7 ms/beat | ~5-10 ms/beat |
-| Memory usage | ~100 MB | ~500 MB |
-| Cross-platform | ✅ Simple | ⚠️ Complex |
-
-## Development
-
-### Adding New Features
-
-The application architecture makes it easy to:
-- Add new visualization types
-- Implement different classification models
-- Customize the UI/UX
-- Export classification results
-
-### Testing
-
-Test the application with different scenarios:
-```bash
-# Test with ONNX model
-python realtime_frontend.py
-
-# Test imports
-python -c "from realtime_frontend import load_data; print('OK')"
-
-# Check model format
-ls -lh sample/*.onnx sample/*.h5
-```
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@misc{ecg_realtime_frontend,
-  title={ECG Real-Time Classification Frontend},
-  author={[Your Name]},
-  year={2024},
-  howpublished={\url{https://github.com/aimatochysia/thesis}}
-}
-```
-
-## License
-
-See the repository LICENSE file for details.
-
-## Support
-
-For issues or questions:
-1. Check the [Troubleshooting](#troubleshooting) section
-2. Review [README_ONNX_CONVERSION.md](README_ONNX_CONVERSION.md)
-3. Open an issue on GitHub
+| Metric | ONNX Runtime |
+|--------|--------------|
+| Installation size | ~10 MB |
+| Cold start time | <1 second |
+| Inference time | ~3-7 ms/beat |
+| Memory usage | ~100 MB |
 
 ## Changelog
+
+### v3.0 - PyTorch ONNX Models
+- Migrated to PyTorch ONNX models (v2/v3/v5)
+- Fixed data leakage (scaler fits on training data only)
+- Added model selection via command line (--model v2/v3/v5)
+- Updated scalers to PyTorch versions
+- Display current model in web interface
 
 ### v2.0 - ONNX Support
 - Added ONNX Runtime support for cross-platform deployment
 - Removed hard dependency on TensorFlow/Keras
-- Added automatic fallback to Keras if ONNX not available
-- Created comprehensive conversion documentation
-- Improved startup time and reduced memory footprint
 
 ### v1.0 - Initial Release
 - Real-time ECG visualization
-- LSTM-based heartbeat classification
-- Web-based interface with Flask
 - TensorFlow/Keras backend

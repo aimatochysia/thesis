@@ -3,48 +3,104 @@ ECG Real-Time Classification Frontend
 
 A mini web-based frontend that simulates real-time ECG monitoring and classification.
 Features:
-- Real-time ECG signal visualization
+- Real-time ECG signal visualization with scrollable history
 - Automatic heartbeat detection at R-peaks
-- AI model classification while time continues in background
+- AI model classification using PyTorch ONNX models (v2/v3/v5/v6)
 - Live classification results display
+- False detection log with clickable navigation
+- Beat waveform snapshot showing exact input to ONNX model
+
+PREPROCESSING (matches training exactly):
+- v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak), single beat classification
+- v6 (Context-Aware): 200 samples per beat (90 before + 110 after R-peak), 7-beat context window
+  - Flatten to (1, 1400) → scale with training scaler → reshape to (1, 7, 200)
+  - Uses record 119 by default (excluded from training for true validation)
+
+DATA SOURCES:
+- All models (v2/v3/v5/v6): Now use 119.csv by default (MIT-BIH record 119)
+  Record 119 was excluded from v6 training, providing true test data for all models
+- --training-data: Use demo_training_signal.csv (deprecated, kept for backward compatibility)
 
 Usage:
-    python realtime_frontend.py
+    python realtime_frontend.py              # Uses v3 (LSTM) by default with record 119
+    python realtime_frontend.py --model v2   # Use CNN model with record 119
+    python realtime_frontend.py --model v3   # Use LSTM model with record 119
+    python realtime_frontend.py --model v5   # Use Transformer model with record 119
+    python realtime_frontend.py --model v6   # Use Context-Aware CNN1D (7-beat rolling buffer)
+    
+    All models now use MIT-BIH record 119 by default for consistent testing.
+    Record 119 was excluded from v6 training, providing true validation data.
+    
     Then open http://localhost:5000 in your browser
 """
 
 import os
 import sys
+import argparse
 import numpy as np
 import pandas as pd
 import joblib
 from flask import Flask, render_template_string, jsonify, request
 
-# ONNX Runtime import for cross-platform inference without Keras dependency
+# ONNX Runtime import for cross-platform inference (PyTorch models exported to ONNX)
 try:
     import onnxruntime as ort
     USE_ONNX = True
 except ImportError:
-    print("Warning: ONNXRuntime not found. Falling back to TensorFlow/Keras.")
-    print("Install ONNXRuntime for better cross-platform support: pip install onnxruntime")
-    try:
-        import tensorflow as tf
-        from tensorflow.keras.models import load_model
-        USE_ONNX = False
-    except ImportError:
-        print("Error: Neither ONNXRuntime nor TensorFlow is available.")
-        print("Install one of them:")
-        print("  pip install onnxruntime  (recommended, lightweight)")
-        print("  pip install tensorflow   (heavier, but works if ONNX model not available)")
-        sys.exit(1)
+    print("Error: ONNXRuntime not found.")
+    print("Install ONNXRuntime for ONNX model inference: pip install onnxruntime")
+    sys.exit(1)
+
+# Model configurations for v2, v3, v5, v6 PyTorch ONNX models
+MODEL_CONFIGS = {
+    'v2': {
+        'name': 'CNN (v2)',
+        'onnx_file': 'ecg_cnn_v2_pytorch_final.onnx',
+        'scaler_file': 'scaler_v2_pytorch.pkl',
+        'input_shape': (1, 1, 188),  # CNN: (batch, channels, length)
+        'beat_length': 188,
+        'context_aware': False,
+    },
+    'v3': {
+        'name': 'LSTM (v3)',
+        'onnx_file': 'ecg_lstm_v3_pytorch_final.onnx',
+        'scaler_file': 'scaler_v3_pytorch.pkl',
+        'input_shape': (1, 188, 1),  # LSTM: (batch, timesteps, features)
+        'beat_length': 188,
+        'context_aware': False,
+    },
+    'v5': {
+        'name': 'Transformer (v5)',
+        'onnx_file': 'ecg_transformer_v5_pytorch_final.onnx',
+        'scaler_file': 'scaler_v5_pytorch.pkl',
+        'input_shape': (1, 188, 1),  # Transformer: (batch, timesteps, features)
+        'beat_length': 188,
+        'context_aware': False,
+    },
+    'v6': {
+        'name': 'Context-Aware CNN1D (v6)',
+        'onnx_file': 'context_ecg_model.onnx',
+        'scaler_file': 'context_ecg_scaler.pkl',
+        'input_shape': (1, 7, 200),  # (batch, channels=7_beats_as_channels, length=200)
+        'beat_length': 200,
+        'context_aware': True,
+        'context_window_size': 7,
+        'pre_r_samples': 90,
+        'post_r_samples': 110,
+    },
+}
 
 # Constants
-BEAT_LENGTH = 188
+BEAT_LENGTH = 188  # Default beat length (v2, v3, v5)
+BEAT_LENGTH_V6 = 200  # v6 beat length
 PRE_SAMPLES = 70
 POST_SAMPLES = 118
+PRE_SAMPLES_V6 = 90
+POST_SAMPLES_V6 = 110
+CONTEXT_WINDOW_SIZE = 7  # v6: 3 previous + 1 center + 3 subsequent beats
 SAMPLING_RATE = 360  # Hz - MIT-BIH standard sampling rate
-NORMAL_BEAT_TYPES = {'N'}
-ABNORMAL_BEAT_TYPES = {'A', 'V', 'F', 'S', 'Q', '!', 'E', 'J', 'L', 'R'}
+# Beat type classification: 'N' is Normal, anything else is Abnormal
+NORMAL_BEAT_TYPE = 'N'
 
 # Global state
 app = Flask(__name__)
@@ -52,33 +108,79 @@ ecg_data = None
 annotations = None
 model = None
 scaler = None
+model_config = None  # Current model configuration
 current_sample = 0
 classification_results = []
 is_running = False
 speed_multiplier = 10  # Speed up simulation (10x faster)
 
+# Rolling beat buffer for v6 context-aware model
+beat_buffer = []  # List of (beat_waveform, beat_type) tuples
 
-def load_data():
-    """Load ECG signal, annotations, model, and scaler."""
-    global ecg_data, annotations, model, scaler
+
+def load_data(model_version='v3', use_training_data=False, use_record_119=True):
+    """Load ECG signal, annotations, model, and scaler.
+    
+    Args:
+        model_version: Which model to use ('v2', 'v3', 'v5', 'v6')
+        use_training_data: If True, use demo data from training set (deprecated).
+                          All models now use 119.csv by default.
+        use_record_119: If True (default), use record 119 (excluded from training - true test).
+                       This is now the default for ALL models (v2, v3, v5, v6).
+    
+    Preprocessing (matches training exactly):
+    - v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak)
+    - v6: 200 samples per beat (90 before + 110 after R-peak), 7-beat context window
+    - Normalization: Uses the same scaler trained on training data ONLY
+    
+    NOTE: All models now use MIT-BIH record 119 by default for consistent testing.
+    Record 119 was excluded from v6 training, and using it for all models provides
+    a fair comparison on unseen real ECG data.
+    """
+    global ecg_data, annotations, model, scaler, model_config, beat_buffer
+    
+    # Reset beat buffer for v6 context-aware model
+    beat_buffer = []
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sample_dir = os.path.join(script_dir, 'sample')
     
-    # Load signal from original CSV
-    signal_path = os.path.join(sample_dir, '100.csv')
+    # All models now use record 119 by default (the reserved test record)
+    # This ensures consistent comparison across v2, v3, v5, and v6
+    print(f"{MODEL_CONFIGS[model_version]['name']}: Using record 119 (excluded from training) for validation")
+    
+    # Choose data source - default is now record 119 for all models
+    if use_record_119:
+        # Use MIT-BIH record 119 - excluded from v6 training, provides true test for all models
+        signal_path = os.path.join(sample_dir, '119.csv')
+        annotation_path = os.path.join(sample_dir, '119annotations.txt')
+        print("Using MIT-BIH record 119 (excluded from training - true test data)")
+    elif use_training_data:
+        # Use demo data created from training set - deprecated, kept for backward compatibility
+        signal_path = os.path.join(sample_dir, 'demo_training_signal.csv')
+        annotation_path = os.path.join(sample_dir, 'demo_training_annotations.txt')
+        if not os.path.exists(signal_path):
+            print("Warning: Training demo data not found, falling back to record 119")
+            signal_path = os.path.join(sample_dir, '119.csv')
+            annotation_path = os.path.join(sample_dir, '119annotations.txt')
+    else:
+        # Fallback to record 119
+        signal_path = os.path.join(sample_dir, '119.csv')
+        annotation_path = os.path.join(sample_dir, '119annotations.txt')
+        print("Using MIT-BIH record 119 (excluded from training - true test data)")
+    
+    # Load signal
     df = pd.read_csv(signal_path)
     df.columns = df.columns.str.strip().str.strip("'")
     ecg_data = df['MLII'].values.astype(np.float32)
     
     # Load annotations
-    annotation_path = os.path.join(sample_dir, '100annotations.txt')
     annotations_list = []
     with open(annotation_path, 'r') as f:
         lines = f.readlines()
     for line in lines[1:]:
         parts = line.strip().split()
-        if len(parts) >= 4:
+        if len(parts) >= 3:
             try:
                 sample_idx = int(parts[1])
                 beat_type = parts[2]
@@ -92,104 +194,202 @@ def load_data():
                 continue
     annotations = pd.DataFrame(annotations_list)
     
-    # Model file paths (defined once for reuse)
-    onnx_model_path = os.path.join(sample_dir, 'ecg_lstm_final.onnx')
-    h5_model_path = os.path.join(sample_dir, 'ecg_lstm_final.h5')
-    keras_model_path = os.path.join(sample_dir, 'ecg_lstm_v3_final.keras')
+    # Get model configuration
+    if model_version not in MODEL_CONFIGS:
+        print(f"Unknown model version '{model_version}'. Using v3 (LSTM) as default.")
+        model_version = 'v3'
     
-    # Load model - try ONNX first (preferred), fallback to Keras
-    if USE_ONNX:
-        # Try to load ONNX model
-        if os.path.exists(onnx_model_path):
-            print(f"Loading ONNX model from: {onnx_model_path}")
-            model = ort.InferenceSession(onnx_model_path)
-            print("ONNX model loaded successfully (Keras-free inference)")
-        elif os.path.exists(h5_model_path):
-            print(f"ONNX model not found. To use ONNX (recommended for cross-platform):")
-            print(f"  Convert {h5_model_path} to ONNX format")
-            print("Attempting to load H5 model with TensorFlow...")
-            import tensorflow as tf
-            from tensorflow.keras.models import load_model as keras_load_model
-            model = keras_load_model(h5_model_path)
-            print("H5 model loaded with TensorFlow/Keras")
-        else:
-            raise FileNotFoundError(f"No model found. Looking for:\n  {onnx_model_path}\n  {h5_model_path}")
+    model_config = MODEL_CONFIGS[model_version]
+    print(f"\nLoading {model_config['name']} model...")
+    
+    # Load ONNX model
+    onnx_model_path = os.path.join(sample_dir, model_config['onnx_file'])
+    if os.path.exists(onnx_model_path):
+        print(f"Loading ONNX model from: {onnx_model_path}")
+        model = ort.InferenceSession(onnx_model_path)
+        print(f"✓ {model_config['name']} ONNX model loaded successfully")
     else:
-        # Use Keras model
-        if os.path.exists(keras_model_path):
-            model = load_model(keras_model_path)
-        elif os.path.exists(h5_model_path):
-            model = load_model(h5_model_path)
-        else:
-            raise FileNotFoundError(f"No Keras model found at:\n  {keras_model_path}\n  {h5_model_path}")
+        raise FileNotFoundError(f"ONNX model not found: {onnx_model_path}")
     
     # Load scaler
-    scaler_path = os.path.join(sample_dir, 'scaler_v3.pkl')
-    scaler = joblib.load(scaler_path)
+    scaler_path = os.path.join(sample_dir, model_config['scaler_file'])
+    if os.path.exists(scaler_path):
+        scaler = joblib.load(scaler_path)
+        print(f"✓ Scaler loaded from: {scaler_path}")
+    else:
+        raise FileNotFoundError(f"Scaler not found: {scaler_path}")
     
-    print(f"Loaded {len(ecg_data)} ECG samples")
+    print(f"\nLoaded {len(ecg_data)} ECG samples")
     print(f"Loaded {len(annotations)} annotations")
 
 
-def extract_and_classify_beat(signal, r_peak_idx, beat_type):
-    """Extract beat at R-peak and classify it."""
-    start_idx = r_peak_idx - PRE_SAMPLES
-    end_idx = r_peak_idx + POST_SAMPLES
+def extract_beat_v6(signal, r_peak_idx):
+    """Extract beat for v6 context-aware model.
     
-    # Handle edge cases
+    PREPROCESSING (matches training exactly):
+    - Beat length: 200 samples (90 before R-peak + 110 after R-peak)
+    - This matches the dataset creator: PRE_R_SAMPLES=90, POST_R_SAMPLES=110
+    - Edge cases handled with zero padding
+    """
+    start_idx = r_peak_idx - PRE_SAMPLES_V6  # 90 samples before R-peak
+    end_idx = r_peak_idx + POST_SAMPLES_V6    # 110 samples after R-peak
+    
+    # Handle edge cases with zero padding
     if start_idx < 0:
         pad_before = -start_idx
-        beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
+        beat = np.zeros(BEAT_LENGTH_V6, dtype=np.float32)
         available = signal[:end_idx]
         beat[pad_before:pad_before + len(available)] = available
     elif end_idx > len(signal):
-        beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
+        beat = np.zeros(BEAT_LENGTH_V6, dtype=np.float32)
         available = signal[start_idx:]
         beat[:len(available)] = available
     else:
         beat = signal[start_idx:end_idx].astype(np.float32)
     
-    # Normalize
-    beat_2d = beat.reshape(1, -1)
-    normalized = scaler.transform(beat_2d).flatten().astype(np.float32)
+    return beat
+
+
+def extract_and_classify_beat(signal, r_peak_idx, beat_type):
+    """Extract beat at R-peak and classify it using PyTorch ONNX model."""
+    global beat_buffer
     
-    # Classify - handle both ONNX and Keras models
-    beat_input = normalized.reshape(1, BEAT_LENGTH, 1)
+    # Check if using v6 context-aware model
+    is_context_aware = model_config.get('context_aware', False)
     
-    # Check if model is an ONNX Runtime session (using hasattr to avoid NameError)
-    if USE_ONNX and hasattr(model, 'run') and hasattr(model, 'get_inputs'):
-        # ONNX model inference
-        input_name = model.get_inputs()[0].name
-        output_name = model.get_outputs()[0].name
-        proba = model.run([output_name], {input_name: beat_input})[0]
+    if is_context_aware:
+        # V6: Extract 200-sample beat and add to rolling buffer
+        beat = extract_beat_v6(signal, r_peak_idx)
+        raw_beat = beat.copy()
+        
+        # Add beat to buffer
+        beat_buffer.append((beat, beat_type))
+        
+        # Keep only last 7 beats
+        if len(beat_buffer) > CONTEXT_WINDOW_SIZE:
+            beat_buffer = beat_buffer[-CONTEXT_WINDOW_SIZE:]
+        
+        # Need 7 beats for context-aware inference
+        if len(beat_buffer) < CONTEXT_WINDOW_SIZE:
+            # Not enough beats yet, return waiting status
+            return {
+                'r_peak': r_peak_idx,
+                'beat_type': beat_type,
+                'ground_truth': "NORMAL" if beat_type == NORMAL_BEAT_TYPE else "ABNORMAL",
+                'predicted': "WAITING",
+                'probability': 0.0,
+                'correct': None,
+                'beat_waveform': raw_beat.tolist(),
+                'buffer_size': len(beat_buffer),
+                'context_aware': True
+            }
+        
+        # ===== V6 PREPROCESSING (matches training exactly) =====
+        # 1. Stack 7 beats into context window: (7, 200)
+        context_beats = np.stack([b for b, _ in beat_buffer], axis=0)
+        
+        # 2. Flatten for scaling: (1, 7*200) = (1, 1400)
+        #    This matches training: X_train_flat = X_train.reshape(n_train, flat_size)
+        flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_V6  # 7 * 200 = 1400
+        context_flat = context_beats.reshape(1, flat_size)
+        
+        # 3. Normalize using scaler (fitted on training data ONLY)
+        #    This matches training: scaler.fit_transform(X_train_flat)
+        normalized = scaler.transform(context_flat).astype(np.float32)
+        
+        # 4. Reshape back to (1, 7, 200) for model input
+        #    This matches training: X_train_norm.reshape(-1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH)
+        context_input = normalized.reshape(1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH_V6)
+        
+        # Center beat info (index 3 in window of 7: positions 0,1,2,3,4,5,6)
+        center_beat_type = beat_buffer[3][1]
+        
     else:
-        # Keras model inference
-        proba = model.predict(beat_input, verbose=0)
+        # V2, V3, V5: Single beat classification (188 samples)
+        start_idx = r_peak_idx - PRE_SAMPLES
+        end_idx = r_peak_idx + POST_SAMPLES
+        
+        # Handle edge cases
+        if start_idx < 0:
+            pad_before = -start_idx
+            beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
+            available = signal[:end_idx]
+            beat[pad_before:pad_before + len(available)] = available
+        elif end_idx > len(signal):
+            beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
+            available = signal[start_idx:]
+            beat[:len(available)] = available
+        else:
+            beat = signal[start_idx:end_idx].astype(np.float32)
+        
+        raw_beat = beat.copy()
+        
+        # Normalize using the scaler (fitted only on training data)
+        beat_2d = beat.reshape(1, -1)
+        normalized = scaler.transform(beat_2d).flatten().astype(np.float32)
+        
+        # Reshape for the specific model architecture
+        input_shape = model_config['input_shape']
+        context_input = normalized.reshape(input_shape)
+        center_beat_type = beat_type
     
-    if proba.shape[1] == 2:
+    # ONNX model inference
+    input_name = model.get_inputs()[0].name
+    output_name = model.get_outputs()[0].name
+    output = model.run([output_name], {input_name: context_input})[0]
+    
+    # Handle output - PyTorch models output raw logits, apply softmax
+    # Output: 0 = Normal, 1 = Abnormal
+    if output.shape[1] == 2:
+        # Check if output looks like logits (any value outside [0,1] range or values don't sum to 1)
+        needs_softmax = (np.min(output) < 0 or np.max(output) > 1 or 
+                         abs(np.sum(output[0]) - 1.0) > 0.01)
+        if needs_softmax:
+            # Apply softmax to convert logits to probabilities
+            exp_output = np.exp(output - np.max(output, axis=1, keepdims=True))
+            proba = exp_output / np.sum(exp_output, axis=1, keepdims=True)
+        else:
+            proba = output
         prob_abnormal = float(proba[0, 1])
     else:
-        prob_abnormal = float(proba[0, 0])
+        # Single output, assume sigmoid was applied
+        prob_abnormal = float(output[0, 0])
+    
+    # Clamp probability to [0, 1] range
+    prob_abnormal = max(0.0, min(1.0, prob_abnormal))
     
     predicted_class = 1 if prob_abnormal >= 0.5 else 0
     predicted_label = "ABNORMAL" if predicted_class == 1 else "NORMAL"
     
-    # Get ground truth
-    if beat_type in NORMAL_BEAT_TYPES:
+    # Get ground truth: 'N' is Normal, anything else is Abnormal
+    if center_beat_type == NORMAL_BEAT_TYPE:
         ground_truth = "NORMAL"
-    elif beat_type in ABNORMAL_BEAT_TYPES:
-        ground_truth = "ABNORMAL"
     else:
-        ground_truth = "UNKNOWN"
+        ground_truth = "ABNORMAL"
     
-    return {
+    # Include R-peak position in beat waveform for accurate marker placement
+    if is_context_aware:
+        r_peak_pos_in_beat = PRE_SAMPLES_V6  # R-peak is at sample 90 for v6
+    else:
+        r_peak_pos_in_beat = PRE_SAMPLES  # R-peak is at sample 70 for v2/v3/v5
+    
+    result = {
         'r_peak': r_peak_idx,
-        'beat_type': beat_type,
+        'beat_type': center_beat_type,
         'ground_truth': ground_truth,
         'predicted': predicted_label,
         'probability': round(prob_abnormal, 4),
-        'correct': ground_truth == predicted_label if ground_truth != "UNKNOWN" else None
+        'correct': ground_truth == predicted_label,
+        'beat_waveform': raw_beat.tolist(),  # Include raw beat for visualization
+        'r_peak_pos_in_beat': r_peak_pos_in_beat,  # Position of R-peak in beat waveform
+        'beat_length': BEAT_LENGTH_V6 if is_context_aware else BEAT_LENGTH
     }
+    
+    if is_context_aware:
+        result['context_aware'] = True
+        result['buffer_size'] = len(beat_buffer)
+    
+    return result
 
 
 # HTML Template with embedded JavaScript for real-time visualization
@@ -403,17 +603,44 @@ HTML_TEMPLATE = '''
         .speed-control {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 5px;
             color: #888;
+            background: rgba(0,0,0,0.3);
+            padding: 8px 12px;
+            border-radius: 20px;
         }
-        #speedSlider {
-            width: 100px;
+        .speed-btn {
+            padding: 5px 10px;
+            font-size: 12px;
+            border-radius: 10px;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #fff;
+            cursor: pointer;
+        }
+        .speed-btn.active {
+            background: rgba(0,255,136,0.3);
+            border-color: #00ff88;
+        }
+        .speed-btn:hover {
+            background: rgba(0,255,136,0.2);
+        }
+        .model-badge {
+            background: linear-gradient(45deg, #00ff88, #00cc6a);
+            color: #1a1a2e;
+            padding: 5px 15px;
+            border-radius: 15px;
+            font-size: 14px;
+            font-weight: bold;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🫀 ECG Real-Time Classification Monitor</h1>
+        <p style="text-align: center; color: #888; margin-bottom: 15px;">
+            Using PyTorch ONNX Model: <span id="modelName" class="model-badge">Loading...</span>
+        </p>
         
         <div class="controls">
             <button id="startBtn" onclick="startSimulation()">▶ Start</button>
@@ -421,8 +648,12 @@ HTML_TEMPLATE = '''
             <button id="resetBtn" onclick="resetSimulation()">🔄 Reset</button>
             <div class="speed-control">
                 <span>Speed:</span>
-                <input type="range" id="speedSlider" min="1" max="50" value="10">
-                <span id="speedValue">10x</span>
+                <button class="speed-btn" onclick="setSpeed(0.1)">0.1x</button>
+                <button class="speed-btn" onclick="setSpeed(0.5)">0.5x</button>
+                <button class="speed-btn active" onclick="setSpeed(1)">1x</button>
+                <button class="speed-btn" onclick="setSpeed(5)">5x</button>
+                <button class="speed-btn" onclick="setSpeed(10)">10x</button>
+                <span id="speedValue">1x</span>
             </div>
         </div>
         
@@ -447,11 +678,50 @@ HTML_TEMPLATE = '''
                 <div class="stat-value" id="heartRate">--</div>
                 <div class="stat-label">BPM</div>
             </div>
+            <div class="stat-item">
+                <div class="stat-value" id="falseCount" style="color: #ffd700;">0</div>
+                <div class="stat-label">False Predictions</div>
+            </div>
         </div>
         
         <div class="ecg-container">
             <canvas id="ecgCanvas"></canvas>
-            <div class="time-display">Time: <span id="currentTime">0:00.000</span></div>
+            <div class="time-display">
+                Time: <span id="currentTime">0:00.000</span>
+                <span id="historyIndicator" style="display: none; margin-left: 15px; background: rgba(255,215,0,0.2); color: #ffd700; padding: 3px 10px; border-radius: 10px; font-size: 12px;">📜 Viewing History</span>
+            </div>
+            <div style="display: flex; justify-content: center; gap: 10px; margin-top: 10px;">
+                <button onclick="scrollHistory(-5)" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">⏪ -5s</button>
+                <button onclick="scrollHistory(-1)" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">◀ -1s</button>
+                <button id="liveBtn" onclick="goToLive()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: linear-gradient(45deg, #ffd700, #ffb700); border: none; color: #1a1a2e; font-weight: bold; cursor: pointer;">🔴 Live</button>
+                <button id="fwdBtn" onclick="scrollHistory(1)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">▶ +1s</button>
+                <button id="fwd5Btn" onclick="scrollHistory(5)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">⏩ +5s</button>
+                <span style="margin: 0 10px; color: #444;">|</span>
+                <button onclick="exportECG('png')" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;">📷 Export PNG</button>
+                <button onclick="exportECG('jpeg')" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;">📄 Export JPEG</button>
+            </div>
+            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 8px;">💡 Drag the graph to scroll through history</p>
+        </div>
+        
+        <!-- Beat Snapshot Panel - Shows the current beat segment sent to ONNX model -->
+        <div class="beat-snapshot-container" style="background: rgba(0, 0, 0, 0.3); border-radius: 15px; padding: 20px; margin-bottom: 20px; border: 1px solid rgba(0, 255, 136, 0.3);">
+            <h3 style="color: #00ff88; margin-bottom: 15px; border-bottom: 1px solid rgba(0, 255, 136, 0.3); padding-bottom: 10px;">💓 Current Beat Snapshot (Input to ONNX Model)</h3>
+            <div style="display: flex; align-items: center; gap: 20px;">
+                <div style="flex: 1;">
+                    <canvas id="beatCanvas" style="width: 100%; height: 150px; background: #0a0a1a; border-radius: 10px;"></canvas>
+                </div>
+                <div style="min-width: 200px; text-align: center;">
+                    <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Beat Type (Annotation)</div>
+                    <div id="beatTypeDisplay" style="font-size: 24px; font-weight: bold; color: #00ff88;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Ground Truth</div>
+                    <div id="groundTruthDisplay" style="font-size: 18px; font-weight: bold; color: #00ff88;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Model Prediction</div>
+                    <div id="predictionDisplay" style="font-size: 18px; font-weight: bold; color: #00ff88;">--</div>
+                </div>
+            </div>
+            <div style="text-align: center; color: #666; font-size: 11px; margin-top: 10px;">
+                188 samples extracted around R-peak → Normalized with scaler → Fed to ONNX model → Output: 0=Normal, 1=Abnormal
+            </div>
         </div>
         
         <div class="results-container">
@@ -473,12 +743,23 @@ HTML_TEMPLATE = '''
                     <p style="color: #888; text-align: center;">No classifications yet. Start the simulation!</p>
                 </div>
             </div>
+            
+            <div class="panel" style="border-left: 4px solid #ffd700;">
+                <h3 style="color: #ffd700 !important;">⚠️ False Detections</h3>
+                <div class="classification-list" id="falseDetectionList">
+                    <p style="color: #888; text-align: center;">No false detections yet.</p>
+                </div>
+            </div>
         </div>
     </div>
     
     <script>
         const canvas = document.getElementById('ecgCanvas');
         const ctx = canvas.getContext('2d');
+        
+        // Beat snapshot canvas
+        const beatCanvas = document.getElementById('beatCanvas');
+        const beatCtx = beatCanvas.getContext('2d');
         
         let ecgData = [];
         let annotations = [];
@@ -487,12 +768,88 @@ HTML_TEMPLATE = '''
         let animationId = null;
         let displayBuffer = [];
         let classifications = [];
-        let lastBeatTime = 0;
-        let speedMultiplier = 10;
+        let falseDetections = [];
+        let beatTimes = [];  // Store recent beat times for BPM calculation
+        let speedMultiplier = 1;  // 1x = real-time
+        let currentBeatWaveform = null;
+        let currentRPeakPos = 70;  // R-peak position in beat waveform
+        let currentBeatLength = 188;  // Beat length
+        
+        // History navigation
+        let viewOffset = 0;  // 0 = live view, negative = viewing history
+        let isLive = true;
+        
+        // High-speed stability: track pending classification requests
+        let isClassifying = false;
+        let classificationQueue = [];  // Queue for pending beats to classify
+        let processedBeats = new Set();  // Track already processed beats to avoid duplicates
+        const MAX_CLASSIFICATIONS = 1000;  // Limit stored classifications to prevent memory issues
+        const MAX_FALSE_DETECTIONS = 100;  // Limit stored false detections
         
         const SAMPLING_RATE = 360;
         const DISPLAY_SECONDS = 5;
         const DISPLAY_SAMPLES = SAMPLING_RATE * DISPLAY_SECONDS;
+        
+        // Speed control
+        function setSpeed(speed) {
+            speedMultiplier = speed;
+            document.getElementById('speedValue').textContent = speed + 'x';
+            document.querySelectorAll('.speed-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.textContent === speed + 'x') btn.classList.add('active');
+            });
+        }
+        
+        // History navigation functions
+        function scrollHistory(seconds) {
+            if (currentIndex < DISPLAY_SAMPLES) return;
+            
+            viewOffset += seconds;
+            const maxHistory = -currentIndex / SAMPLING_RATE;
+            viewOffset = Math.max(maxHistory, Math.min(0, viewOffset));
+            
+            isLive = viewOffset >= -0.1;
+            updateHistoryUI();
+            drawECG();
+            updateTime();
+        }
+        
+        function goToLive() {
+            viewOffset = 0;
+            isLive = true;
+            updateHistoryUI();
+            drawECG();
+            updateTime();
+        }
+        
+        function navigateToTime(sampleIndex) {
+            const targetOffset = (sampleIndex - currentIndex + DISPLAY_SAMPLES/2) / SAMPLING_RATE;
+            if (targetOffset >= 0) {
+                goToLive();
+                return;
+            }
+            viewOffset = targetOffset;
+            isLive = false;
+            updateHistoryUI();
+            drawECG();
+            updateTime();
+        }
+        
+        function updateHistoryUI() {
+            const indicator = document.getElementById('historyIndicator');
+            const fwdBtn = document.getElementById('fwdBtn');
+            const fwd5Btn = document.getElementById('fwd5Btn');
+            
+            if (isLive) {
+                indicator.style.display = 'none';
+                fwdBtn.disabled = true;
+                fwd5Btn.disabled = true;
+            } else {
+                indicator.style.display = 'inline';
+                fwdBtn.disabled = false;
+                fwd5Btn.disabled = false;
+            }
+        }
         
         // Resize canvas to be pixel-perfect
         function resizeCanvas() {
@@ -500,15 +857,302 @@ HTML_TEMPLATE = '''
             canvas.width = rect.width * window.devicePixelRatio;
             canvas.height = rect.height * window.devicePixelRatio;
             ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            
+            // Also resize beat canvas
+            const beatRect = beatCanvas.getBoundingClientRect();
+            beatCanvas.width = beatRect.width * window.devicePixelRatio;
+            beatCanvas.height = beatRect.height * window.devicePixelRatio;
+            beatCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            
+            // Redraw beat if available
+            if (currentBeatWaveform) {
+                drawBeatWaveform(currentBeatWaveform);
+            }
         }
         resizeCanvas();
         window.addEventListener('resize', resizeCanvas);
         
-        // Speed slider
-        document.getElementById('speedSlider').addEventListener('input', (e) => {
-            speedMultiplier = parseInt(e.target.value);
-            document.getElementById('speedValue').textContent = speedMultiplier + 'x';
+        // ============================================================
+        // DRAG INTERACTION FOR SCROLLABLE HISTORY
+        // ============================================================
+        let isDragging = false;
+        let lastDragX = 0;
+        
+        canvas.style.cursor = 'grab';
+        
+        function startDrag(x) {
+            isDragging = true;
+            lastDragX = x;
+            canvas.style.cursor = 'grabbing';
+        }
+        
+        function drag(x) {
+            if (!isDragging) return;
+            
+            const deltaX = x - lastDragX;
+            lastDragX = x;
+            
+            // Convert pixel delta to time delta (negative = go back in time)
+            const canvasWidth = canvas.getBoundingClientRect().width;
+            const secondsPerPixel = DISPLAY_SECONDS / canvasWidth;
+            const deltaSeconds = -deltaX * secondsPerPixel;
+            
+            if (Math.abs(deltaSeconds) > 0.01) {
+                scrollHistory(deltaSeconds);
+            }
+        }
+        
+        function endDrag() {
+            isDragging = false;
+            canvas.style.cursor = 'grab';
+        }
+        
+        // Mouse events
+        canvas.addEventListener('mousedown', (e) => startDrag(e.clientX));
+        canvas.addEventListener('mousemove', (e) => drag(e.clientX));
+        canvas.addEventListener('mouseup', () => endDrag());
+        canvas.addEventListener('mouseleave', () => endDrag());
+        
+        // Touch events for mobile
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startDrag(e.touches[0].clientX);
         });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            drag(e.touches[0].clientX);
+        });
+        canvas.addEventListener('touchend', () => endDrag());
+        
+        // ============================================================
+        // EXPORT TO MEDICAL IMAGE
+        // ============================================================
+        function exportECG(format = 'png') {
+            const exportWidth = 1200;
+            const exportHeight = 600;
+            
+            // Create a new canvas for export
+            const exportCanvas = document.createElement('canvas');
+            exportCanvas.width = exportWidth;
+            exportCanvas.height = exportHeight;
+            const exportCtx = exportCanvas.getContext('2d');
+            
+            // White background for medical printing
+            exportCtx.fillStyle = '#ffffff';
+            exportCtx.fillRect(0, 0, exportWidth, exportHeight);
+            
+            // Header section
+            exportCtx.fillStyle = '#333333';
+            exportCtx.font = 'bold 18px Arial';
+            exportCtx.fillText('ECG Analysis Report', 20, 30);
+            
+            exportCtx.font = '12px Arial';
+            exportCtx.fillStyle = '#666666';
+            const modelName = document.getElementById('modelName').textContent;
+            const timestamp = new Date().toISOString();
+            exportCtx.fillText('Model: ' + modelName, 20, 50);
+            exportCtx.fillText('Timestamp: ' + timestamp, 20, 68);
+            
+            // Get display window
+            let endSample = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
+            let startSample = Math.max(0, endSample - DISPLAY_SAMPLES);
+            let buffer = [];
+            for (let i = startSample; i < endSample && i < ecgData.length; i++) {
+                buffer.push(ecgData[i]);
+            }
+            
+            const timeStart = (startSample / SAMPLING_RATE).toFixed(2);
+            const timeEnd = (endSample / SAMPLING_RATE).toFixed(2);
+            exportCtx.fillText('Time Range: ' + timeStart + 's - ' + timeEnd + 's', 300, 50);
+            
+            // Graph area
+            const graphX = 50;
+            const graphY = 90;
+            const graphWidth = exportWidth - 100;
+            const graphHeight = exportHeight - 180;
+            
+            // Graph border
+            exportCtx.strokeStyle = '#cccccc';
+            exportCtx.lineWidth = 1;
+            exportCtx.strokeRect(graphX, graphY, graphWidth, graphHeight);
+            
+            // Medical ECG grid (red)
+            exportCtx.strokeStyle = '#ffcccc';
+            exportCtx.lineWidth = 0.5;
+            for (let x = graphX; x <= graphX + graphWidth; x += 20) {
+                exportCtx.beginPath();
+                exportCtx.moveTo(x, graphY);
+                exportCtx.lineTo(x, graphY + graphHeight);
+                exportCtx.stroke();
+            }
+            for (let y = graphY; y <= graphY + graphHeight; y += 20) {
+                exportCtx.beginPath();
+                exportCtx.moveTo(graphX, y);
+                exportCtx.lineTo(graphX + graphWidth, y);
+                exportCtx.stroke();
+            }
+            
+            // Large grid
+            exportCtx.strokeStyle = '#ff9999';
+            exportCtx.lineWidth = 1;
+            for (let x = graphX; x <= graphX + graphWidth; x += 100) {
+                exportCtx.beginPath();
+                exportCtx.moveTo(x, graphY);
+                exportCtx.lineTo(x, graphY + graphHeight);
+                exportCtx.stroke();
+            }
+            for (let y = graphY; y <= graphY + graphHeight; y += 100) {
+                exportCtx.beginPath();
+                exportCtx.moveTo(graphX, y);
+                exportCtx.lineTo(graphX + graphWidth, y);
+                exportCtx.stroke();
+            }
+            
+            // Draw ECG signal
+            if (buffer.length >= 2) {
+                const minVal = Math.min(...buffer);
+                const maxVal = Math.max(...buffer);
+                const range = maxVal - minVal || 1;
+                
+                exportCtx.strokeStyle = '#00aa66';
+                exportCtx.lineWidth = 1.5;
+                exportCtx.beginPath();
+                
+                for (let i = 0; i < buffer.length; i++) {
+                    const x = graphX + (i / buffer.length) * graphWidth;
+                    const y = graphY + graphHeight - ((buffer[i] - minVal) / range) * (graphHeight - 20) - 10;
+                    
+                    if (i === 0) {
+                        exportCtx.moveTo(x, y);
+                    } else {
+                        exportCtx.lineTo(x, y);
+                    }
+                }
+                exportCtx.stroke();
+                
+                // Draw R-peak markers
+                annotations.forEach(ann => {
+                    if (ann.sample_index > startSample && ann.sample_index <= endSample) {
+                        const bufferIdx = ann.sample_index - startSample;
+                        if (bufferIdx >= 0 && bufferIdx < buffer.length) {
+                            const x = graphX + (bufferIdx / buffer.length) * graphWidth;
+                            const y = graphY + graphHeight - ((buffer[bufferIdx] - minVal) / range) * (graphHeight - 20) - 10;
+                            
+                            // Check for false detection
+                            const classResult = classifications.find(c => c.r_peak === ann.sample_index);
+                            if (classResult && classResult.correct === false) {
+                                exportCtx.strokeStyle = '#cc8800';
+                                exportCtx.lineWidth = 2;
+                                exportCtx.beginPath();
+                                exportCtx.arc(x, y, 8, 0, Math.PI * 2);
+                                exportCtx.stroke();
+                            }
+                            
+                            // R-peak marker
+                            exportCtx.fillStyle = ann.beat_type === 'N' ? '#00aa66' : '#cc3333';
+                            exportCtx.beginPath();
+                            exportCtx.arc(x, y, 4, 0, Math.PI * 2);
+                            exportCtx.fill();
+                        }
+                    }
+                });
+            }
+            
+            // Legend
+            const legendY = exportHeight - 70;
+            exportCtx.font = '11px Arial';
+            exportCtx.fillStyle = '#00aa66';
+            exportCtx.beginPath();
+            exportCtx.arc(60, legendY, 5, 0, Math.PI * 2);
+            exportCtx.fill();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('Normal Beat', 72, legendY + 4);
+            
+            exportCtx.fillStyle = '#cc3333';
+            exportCtx.beginPath();
+            exportCtx.arc(180, legendY, 5, 0, Math.PI * 2);
+            exportCtx.fill();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('Abnormal Beat', 192, legendY + 4);
+            
+            exportCtx.strokeStyle = '#cc8800';
+            exportCtx.lineWidth = 2;
+            exportCtx.beginPath();
+            exportCtx.arc(320, legendY, 7, 0, Math.PI * 2);
+            exportCtx.stroke();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('False Detection', 335, legendY + 4);
+            
+            // Create download link
+            const dataURL = exportCanvas.toDataURL('image/' + format, 0.95);
+            const link = document.createElement('a');
+            link.download = 'ecg_export_' + timestamp.replace(/[:.]/g, '-') + '.' + format;
+            link.href = dataURL;
+            link.click();
+            
+            console.log('[ECG] Exported ' + format.toUpperCase() + ' image');
+        }
+        
+        // Draw beat waveform on the beat snapshot canvas
+        function drawBeatWaveform(waveform, isAbnormal = false) {
+            const width = beatCanvas.getBoundingClientRect().width;
+            const height = beatCanvas.getBoundingClientRect().height;
+            
+            // Clear canvas
+            beatCtx.fillStyle = '#0a0a1a';
+            beatCtx.fillRect(0, 0, width, height);
+            
+            // Draw grid
+            beatCtx.strokeStyle = 'rgba(0, 255, 136, 0.1)';
+            beatCtx.lineWidth = 1;
+            for (let x = 0; x < width; x += 30) {
+                beatCtx.beginPath();
+                beatCtx.moveTo(x, 0);
+                beatCtx.lineTo(x, height);
+                beatCtx.stroke();
+            }
+            for (let y = 0; y < height; y += 30) {
+                beatCtx.beginPath();
+                beatCtx.moveTo(0, y);
+                beatCtx.lineTo(width, y);
+                beatCtx.stroke();
+            }
+            
+            if (!waveform || waveform.length < 2) return;
+            
+            // Find min/max for scaling
+            const minVal = Math.min(...waveform);
+            const maxVal = Math.max(...waveform);
+            const range = maxVal - minVal || 1;
+            
+            // Draw beat waveform
+            beatCtx.strokeStyle = isAbnormal ? '#ff4757' : '#00ff88';
+            beatCtx.lineWidth = 2;
+            beatCtx.beginPath();
+            
+            for (let i = 0; i < waveform.length; i++) {
+                const x = (i / waveform.length) * width;
+                const y = height - ((waveform[i] - minVal) / range) * (height - 20) - 10;
+                
+                if (i === 0) {
+                    beatCtx.moveTo(x, y);
+                } else {
+                    beatCtx.lineTo(x, y);
+                }
+            }
+            beatCtx.stroke();
+            
+            // Draw R-peak marker at the correct position (varies by model: v2/v3/v5=70, v6=90)
+            const rPeakX = (currentRPeakPos / waveform.length) * width;
+            const rPeakY = height - ((waveform[Math.min(currentRPeakPos, waveform.length-1)] - minVal) / range) * (height - 20) - 10;
+            beatCtx.fillStyle = '#ffcc00';
+            beatCtx.beginPath();
+            beatCtx.arc(rPeakX, rPeakY, 6, 0, Math.PI * 2);
+            beatCtx.fill();
+            beatCtx.fillStyle = '#ffcc00';
+            beatCtx.font = '11px Arial';
+            beatCtx.fillText('R-peak', rPeakX - 18, rPeakY - 10);
+        }
         
         // Load data from server
         async function loadData() {
@@ -544,11 +1188,21 @@ HTML_TEMPLATE = '''
                 ctx.stroke();
             }
             
-            if (displayBuffer.length < 2) return;
+            // Calculate display range based on view offset
+            let endSample = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
+            let startSample = Math.max(0, endSample - DISPLAY_SAMPLES);
+            
+            // Get display buffer from ecgData
+            let buffer = [];
+            for (let i = startSample; i < endSample && i < ecgData.length; i++) {
+                buffer.push(ecgData[i]);
+            }
+            
+            if (buffer.length < 2) return;
             
             // Find min/max for scaling
-            const minVal = Math.min(...displayBuffer);
-            const maxVal = Math.max(...displayBuffer);
+            const minVal = Math.min(...buffer);
+            const maxVal = Math.max(...buffer);
             const range = maxVal - minVal || 1;
             
             // Draw ECG line
@@ -556,9 +1210,9 @@ HTML_TEMPLATE = '''
             ctx.lineWidth = 2;
             ctx.beginPath();
             
-            for (let i = 0; i < displayBuffer.length; i++) {
+            for (let i = 0; i < buffer.length; i++) {
                 const x = (i / DISPLAY_SAMPLES) * width;
-                const y = height - ((displayBuffer[i] - minVal) / range) * (height - 40) - 20;
+                const y = height - ((buffer[i] - minVal) / range) * (height - 40) - 20;
                 
                 if (i === 0) {
                     ctx.moveTo(x, y);
@@ -569,13 +1223,23 @@ HTML_TEMPLATE = '''
             ctx.stroke();
             
             // Draw R-peak markers
-            const startSample = currentIndex - displayBuffer.length;
             annotations.forEach(ann => {
-                if (ann.sample_index > startSample && ann.sample_index <= currentIndex) {
+                if (ann.sample_index > startSample && ann.sample_index <= endSample) {
                     const bufferIdx = ann.sample_index - startSample;
-                    if (bufferIdx >= 0 && bufferIdx < displayBuffer.length) {
+                    if (bufferIdx >= 0 && bufferIdx < buffer.length) {
                         const x = (bufferIdx / DISPLAY_SAMPLES) * width;
-                        const y = height - ((displayBuffer[bufferIdx] - minVal) / range) * (height - 40) - 20;
+                        const y = height - ((buffer[bufferIdx] - minVal) / range) * (height - 40) - 20;
+                        
+                        // Check if this beat has a false detection
+                        const classResult = classifications.find(c => c.r_peak === ann.sample_index);
+                        if (classResult && classResult.correct === false) {
+                            // Yellow circle for false detection
+                            ctx.strokeStyle = '#ffd700';
+                            ctx.lineWidth = 3;
+                            ctx.beginPath();
+                            ctx.arc(x, y, 10, 0, Math.PI * 2);
+                            ctx.stroke();
+                        }
                         
                         // Draw marker
                         ctx.fillStyle = ann.beat_type === 'N' ? '#00ff88' : '#ff4757';
@@ -585,43 +1249,111 @@ HTML_TEMPLATE = '''
                     }
                 }
             });
+            
+            // Show "History Mode" indicator if not live
+            if (!isLive) {
+                ctx.fillStyle = 'rgba(255, 215, 0, 0.9)';
+                ctx.font = 'bold 14px Arial';
+                ctx.fillText('📜 VIEWING HISTORY', 10, 25);
+            }
         }
         
         // Update time display
         function updateTime() {
-            const seconds = currentIndex / SAMPLING_RATE;
+            let displayIndex = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
+            const seconds = displayIndex / SAMPLING_RATE;
             const minutes = Math.floor(seconds / 60);
             const secs = (seconds % 60).toFixed(3);
             document.getElementById('currentTime').textContent = 
                 `${minutes}:${secs.padStart(6, '0')}`;
         }
         
-        // Check for beats and classify
-        async function checkForBeats() {
-            const prevSample = currentIndex - speedMultiplier;
+        // Calculate BPM from recent beat intervals
+        function calculateBPM(currentBeatSample) {
+            beatTimes.push(currentBeatSample);
             
-            for (const ann of annotations) {
-                if (ann.sample_index > prevSample && ann.sample_index <= currentIndex && ann.beat_type !== '+') {
-                    // Found a beat! Classify it
-                    const response = await fetch('/api/classify', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            r_peak: ann.sample_index,
-                            beat_type: ann.beat_type
-                        })
-                    });
-                    const result = await response.json();
-                    addClassification(result);
-                    
-                    // Calculate heart rate
-                    if (lastBeatTime > 0) {
-                        const beatInterval = (ann.sample_index - lastBeatTime) / SAMPLING_RATE;
-                        const bpm = Math.round(60 / beatInterval);
-                        document.getElementById('heartRate').textContent = bpm;
-                    }
-                    lastBeatTime = ann.sample_index;
+            // Keep only last 10 beats for smoothing
+            if (beatTimes.length > 10) {
+                beatTimes.shift();
+            }
+            
+            if (beatTimes.length < 2) return null;
+            
+            // Calculate average interval from recent beats
+            let totalInterval = 0;
+            let count = 0;
+            for (let i = 1; i < beatTimes.length; i++) {
+                const interval = (beatTimes[i] - beatTimes[i-1]) / SAMPLING_RATE;
+                // Only count reasonable intervals (30-200 BPM range)
+                if (interval > 0.3 && interval < 2.0) {
+                    totalInterval += interval;
+                    count++;
                 }
+            }
+            
+            if (count === 0) return null;
+            
+            const avgInterval = totalInterval / count;
+            return Math.round(60 / avgInterval);
+        }
+        
+        // Check for beats and classify - with throttling for high-speed mode
+        async function checkForBeats() {
+            // Skip if already processing classifications
+            if (isClassifying) return;
+            
+            // Calculate samples to check based on speed
+            const samplesToCheck = Math.max(1, Math.round(speedMultiplier * (SAMPLING_RATE / 60)));
+            const prevSample = currentIndex - samplesToCheck;
+            
+            // Collect beats to classify (avoid duplicates)
+            const beatsToClassify = [];
+            for (const ann of annotations) {
+                if (ann.sample_index > prevSample && ann.sample_index <= currentIndex && 
+                    ann.beat_type !== '+' && !processedBeats.has(ann.sample_index)) {
+                    beatsToClassify.push(ann);
+                }
+            }
+            
+            if (beatsToClassify.length === 0) return;
+            
+            isClassifying = true;
+            
+            try {
+                for (const ann of beatsToClassify) {
+                    // Mark as processed immediately to prevent duplicates
+                    processedBeats.add(ann.sample_index);
+                    
+                    // Limit processed beats set size to prevent memory issues
+                    if (processedBeats.size > 5000) {
+                        const toRemove = [...processedBeats].slice(0, 1000);
+                        toRemove.forEach(v => processedBeats.delete(v));
+                    }
+                    
+                    try {
+                        const response = await fetch('/api/classify', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                r_peak: ann.sample_index,
+                                beat_type: ann.beat_type
+                            })
+                        });
+                        const result = await response.json();
+                        console.log('[ECG] Beat at', ann.sample_index, ':', result.predicted);
+                        addClassification(result);
+                        
+                        // Calculate heart rate
+                        const bpm = calculateBPM(ann.sample_index);
+                        if (bpm !== null && bpm > 0 && bpm < 300) {
+                            document.getElementById('heartRate').textContent = bpm;
+                        }
+                    } catch (e) {
+                        console.error('Classification error:', e);
+                    }
+                }
+            } finally {
+                isClassifying = false;
             }
         }
         
@@ -629,16 +1361,32 @@ HTML_TEMPLATE = '''
         function addClassification(result) {
             classifications.unshift(result);
             
+            // Limit array size to prevent memory issues at high speed
+            if (classifications.length > MAX_CLASSIFICATIONS) {
+                classifications = classifications.slice(0, MAX_CLASSIFICATIONS);
+            }
+            
+            // Track false detections
+            if (result.correct === false) {
+                falseDetections.unshift(result);
+                // Limit false detections array
+                if (falseDetections.length > MAX_FALSE_DETECTIONS) {
+                    falseDetections = falseDetections.slice(0, MAX_FALSE_DETECTIONS);
+                }
+                updateFalseDetectionList();
+            }
+            
             // Update stats
-            const total = classifications.length;
+            const total = classifications.filter(c => c.correct !== null).length;
             const normal = classifications.filter(c => c.predicted === 'NORMAL').length;
-            const abnormal = total - normal;
+            const abnormal = classifications.filter(c => c.predicted === 'ABNORMAL').length;
             const correct = classifications.filter(c => c.correct === true).length;
             const known = classifications.filter(c => c.correct !== null).length;
             
-            document.getElementById('totalBeats').textContent = total;
+            document.getElementById('totalBeats').textContent = classifications.length;
             document.getElementById('normalBeats').textContent = normal;
             document.getElementById('abnormalBeats').textContent = abnormal;
+            document.getElementById('falseCount').textContent = falseDetections.length;
             if (known > 0) {
                 document.getElementById('accuracy').textContent = 
                     Math.round((correct / known) * 100) + '%';
@@ -657,6 +1405,29 @@ HTML_TEMPLATE = '''
             document.getElementById('probText').textContent = 
                 `Abnormal Probability: ${(prob * 100).toFixed(1)}%`;
             
+            // Update beat snapshot display
+            if (result.beat_waveform) {
+                currentBeatWaveform = result.beat_waveform;
+                // Update R-peak position from result (v2/v3/v5=70, v6=90)
+                currentRPeakPos = result.r_peak_pos_in_beat || 70;
+                currentBeatLength = result.beat_length || 188;
+                const isAbnormal = result.predicted === 'ABNORMAL';
+                drawBeatWaveform(result.beat_waveform, isAbnormal);
+                
+                // Update beat info displays
+                const beatTypeEl = document.getElementById('beatTypeDisplay');
+                beatTypeEl.textContent = result.beat_type;
+                beatTypeEl.style.color = result.beat_type === 'N' ? '#00ff88' : '#ff4757';
+                
+                const groundTruthEl = document.getElementById('groundTruthDisplay');
+                groundTruthEl.textContent = result.ground_truth;
+                groundTruthEl.style.color = result.ground_truth === 'NORMAL' ? '#00ff88' : '#ff4757';
+                
+                const predictionEl = document.getElementById('predictionDisplay');
+                predictionEl.textContent = result.predicted;
+                predictionEl.style.color = result.predicted === 'NORMAL' ? '#00ff88' : '#ff4757';
+            }
+            
             // Update list
             const listEl = document.getElementById('classificationList');
             if (classifications.length === 1) {
@@ -665,7 +1436,11 @@ HTML_TEMPLATE = '''
             
             const time = (result.r_peak / SAMPLING_RATE).toFixed(2);
             const item = document.createElement('div');
+            const incorrectClass = result.correct === false ? ' style="border: 2px solid #ffd700;"' : '';
             item.className = 'classification-item ' + result.predicted.toLowerCase();
+            if (result.correct === false) item.style.border = '2px solid #ffd700';
+            item.style.cursor = 'pointer';
+            item.onclick = () => navigateToTime(result.r_peak);
             item.innerHTML = `
                 <div class="beat-info">
                     <div>Beat Type: ${result.beat_type} → ${result.predicted}</div>
@@ -675,32 +1450,73 @@ HTML_TEMPLATE = '''
             `;
             listEl.insertBefore(item, listEl.firstChild);
             
-            // Keep only last 50 items
-            while (listEl.children.length > 50) {
+            // Keep only last 100 items
+            while (listEl.children.length > 100) {
                 listEl.removeChild(listEl.lastChild);
             }
         }
         
-        // Animation loop
-        function animate() {
-            if (!isRunning) return;
+        // Update false detection list
+        function updateFalseDetectionList() {
+            const listEl = document.getElementById('falseDetectionList');
             
-            // Advance samples based on speed
-            for (let i = 0; i < speedMultiplier; i++) {
-                if (currentIndex < ecgData.length) {
-                    displayBuffer.push(ecgData[currentIndex]);
-                    currentIndex++;
-                    
-                    // Keep buffer at display size
-                    while (displayBuffer.length > DISPLAY_SAMPLES) {
-                        displayBuffer.shift();
-                    }
-                }
+            if (falseDetections.length === 0) {
+                listEl.innerHTML = '<p style="color: #888; text-align: center;">No false detections yet.</p>';
+                return;
             }
             
-            drawECG();
-            updateTime();
-            checkForBeats();
+            listEl.innerHTML = '';
+            
+            falseDetections.slice(0, 50).forEach(result => {
+                const time = (result.r_peak / SAMPLING_RATE).toFixed(2);
+                const item = document.createElement('div');
+                item.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; margin-bottom: 6px; border-radius: 8px; background: rgba(255, 215, 0, 0.15); border-left: 3px solid #ffd700; cursor: pointer;';
+                item.onclick = () => navigateToTime(result.r_peak);
+                item.innerHTML = `
+                    <div>
+                        <span style="color: #ffd700; font-weight: bold;">${time}s</span>
+                        <span style="color: #aaa; font-size: 11px; margin-left: 8px;">Expected: ${result.ground_truth} | Got: ${result.predicted}</span>
+                    </div>
+                `;
+                item.onmouseover = () => { item.style.background = 'rgba(255, 215, 0, 0.3)'; item.style.transform = 'translateX(5px)'; };
+                item.onmouseout = () => { item.style.background = 'rgba(255, 215, 0, 0.15)'; item.style.transform = 'none'; };
+                listEl.appendChild(item);
+            });
+        }
+        
+        // Animation loop with proper timing
+        let lastFrameTime = 0;
+        const targetFPS = 60;
+        const frameInterval = 1000 / targetFPS;
+        
+        function animate(timestamp) {
+            if (!isRunning) return;
+            
+            // Calculate time delta for proper timing
+            const deltaTime = timestamp - lastFrameTime;
+            
+            if (deltaTime >= frameInterval) {
+                lastFrameTime = timestamp - (deltaTime % frameInterval);
+                
+                // Calculate samples to advance: 1x speed = 360 samples/sec = 6 samples/frame at 60fps
+                const samplesPerSecond = SAMPLING_RATE * speedMultiplier;
+                const samplesToAdvance = Math.max(1, Math.round(samplesPerSecond / targetFPS));
+                
+                // Advance samples
+                for (let i = 0; i < samplesToAdvance; i++) {
+                    if (currentIndex < ecgData.length) {
+                        currentIndex++;
+                    }
+                }
+                
+                // Update display if in live mode
+                if (isLive) {
+                    drawECG();
+                    updateTime();
+                }
+                
+                checkForBeats();
+            }
             
             if (currentIndex < ecgData.length) {
                 animationId = requestAnimationFrame(animate);
@@ -716,7 +1532,8 @@ HTML_TEMPLATE = '''
                 await loadData();
             }
             isRunning = true;
-            animate();
+            lastFrameTime = performance.now();
+            animationId = requestAnimationFrame(animate);
         }
         
         function stopSimulation() {
@@ -729,27 +1546,66 @@ HTML_TEMPLATE = '''
         function resetSimulation() {
             stopSimulation();
             currentIndex = 0;
-            displayBuffer = [];
             classifications = [];
-            lastBeatTime = 0;
+            falseDetections = [];
+            beatTimes = [];
+            currentBeatWaveform = null;
+            viewOffset = 0;
+            isLive = true;
+            
+            // Reset high-speed stability tracking
+            isClassifying = false;
+            classificationQueue = [];
+            processedBeats.clear();
             
             document.getElementById('totalBeats').textContent = '0';
             document.getElementById('normalBeats').textContent = '0';
             document.getElementById('abnormalBeats').textContent = '0';
             document.getElementById('accuracy').textContent = '--';
             document.getElementById('heartRate').textContent = '--';
+            document.getElementById('falseCount').textContent = '0';
             document.getElementById('currentStatus').textContent = 'Waiting...';
             document.getElementById('currentStatus').className = 'value';
             document.getElementById('probBar').style.width = '0%';
             document.getElementById('probText').textContent = 'Abnormal Probability: --';
             document.getElementById('classificationList').innerHTML = 
                 '<p style="color: #888; text-align: center;">No classifications yet. Start the simulation!</p>';
+            document.getElementById('falseDetectionList').innerHTML = 
+                '<p style="color: #888; text-align: center;">No false detections yet.</p>';
             document.getElementById('currentTime').textContent = '0:00.000';
+            
+            updateHistoryUI();
+            
+            // Reset beat snapshot
+            document.getElementById('beatTypeDisplay').textContent = '--';
+            document.getElementById('beatTypeDisplay').style.color = '#00ff88';
+            document.getElementById('groundTruthDisplay').textContent = '--';
+            document.getElementById('groundTruthDisplay').style.color = '#00ff88';
+            document.getElementById('predictionDisplay').textContent = '--';
+            document.getElementById('predictionDisplay').style.color = '#00ff88';
+            
+            // Clear beat canvas
+            const width = beatCanvas.getBoundingClientRect().width;
+            const height = beatCanvas.getBoundingClientRect().height;
+            beatCtx.fillStyle = '#0a0a1a';
+            beatCtx.fillRect(0, 0, width, height);
             
             drawECG();
         }
         
+        // Load model info
+        async function loadModelInfo() {
+            try {
+                const response = await fetch('/api/model_info');
+                const info = await response.json();
+                document.getElementById('modelName').textContent = info.name;
+            } catch (e) {
+                console.error('Failed to load model info:', e);
+            }
+        }
+        
         // Initialize
+        loadModelInfo();
         loadData().then(() => {
             drawECG();
         });
@@ -785,21 +1641,58 @@ def classify():
     return jsonify(result)
 
 
+@app.route('/api/model_info')
+def get_model_info():
+    """Return current model information."""
+    return jsonify({
+        'name': model_config['name'],
+        'onnx_file': model_config['onnx_file'],
+        'scaler_file': model_config['scaler_file'],
+    })
+
+
 def main():
     """Run the real-time frontend."""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='ECG Real-Time Classification Frontend')
+    parser.add_argument('--model', '-m', type=str, default='v3', choices=['v2', 'v3', 'v5', 'v6'],
+                        help='Model version to use: v2 (CNN), v3 (LSTM), v5 (Transformer), v6 (Context-Aware CNN1D). Default: v3')
+    parser.add_argument('--port', '-p', type=int, default=5000,
+                        help='Port to run the server on. Default: 5000')
+    parser.add_argument('--training-data', action='store_true',
+                        help='Use demo training data instead of record 119. (Deprecated)')
+    args = parser.parse_args()
+    
     print("=" * 60)
     print("ECG Real-Time Classification Frontend")
+    print("Using PyTorch ONNX Models")
     print("=" * 60)
     
-    print("\nLoading data...")
-    load_data()
+    print(f"\nSelected model: {args.model.upper()}")
+    if args.model == 'v6':
+        print("  Context-Aware CNN1D: Uses 7-beat rolling buffer (3 prev + center + 3 next)")
+        print("  Beat extraction: 200 samples (90 before + 110 after R-peak)")
+        print("  Normalization: Flatten 7x200 → scale → reshape to (7, 200)")
+        print("  First 3 beats will show 'WAITING' status until buffer is full")
+    else:
+        print(f"  Single-beat classification: 188 samples (70 before + 118 after R-peak)")
     
-    print("\nStarting web server...")
-    print("Open your browser and go to: http://localhost:5000")
+    # All models now use record 119 by default
+    # --training-data flag allows falling back to demo data (deprecated)
+    use_record_119 = not args.training_data
+    use_training_data = args.training_data
+    
+    print("  Data: Using MIT-BIH record 119 (excluded from training - true validation)")
+    
+    print("Loading data and model...")
+    load_data(model_version=args.model, use_training_data=use_training_data, use_record_119=use_record_119)
+    
+    print(f"\nStarting web server on port {args.port}...")
+    print(f"Open your browser and go to: http://localhost:{args.port}")
     print("\nPress Ctrl+C to stop the server")
     print("=" * 60)
     
-    app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
+    app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
 
 
 if __name__ == '__main__':
