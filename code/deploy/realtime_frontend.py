@@ -1050,10 +1050,36 @@ HTML_TEMPLATE = '''
                     const rowStartTime = (rowStartSample / SAMPLING_RATE);
                     const rowEndTime = (rowEndSample / SAMPLING_RATE);
                     
+                    // Calculate actual width for this row's data (partial rows don't fill full width)
+                    const rowDataWidth = (rowBuffer.length / samplesPerRow) * graphWidth;
+                    const isPartialRow = rowBuffer.length < samplesPerRow;
+                    
                     exportCtx.fillStyle = '#1a5276';
                     exportCtx.font = 'bold 14px Arial';
                     exportCtx.fillText(formatTime(rowStartTime), 10, graphY + graphHeight / 2 + 5);
-                    exportCtx.fillText(formatTime(rowEndTime), exportWidth - 85, graphY + graphHeight / 2 + 5);
+                    
+                    // Position end time label at actual data end (not fixed right edge) for partial rows
+                    if (isPartialRow) {
+                        const endLabelX = graphX + rowDataWidth + 10;
+                        exportCtx.fillText(formatTime(rowEndTime), endLabelX, graphY + graphHeight / 2 + 5);
+                        
+                        // Draw a vertical line to indicate where data ends
+                        exportCtx.strokeStyle = '#aaaaaa';
+                        exportCtx.lineWidth = 2;
+                        exportCtx.setLineDash([5, 5]);
+                        exportCtx.beginPath();
+                        exportCtx.moveTo(graphX + rowDataWidth, graphY);
+                        exportCtx.lineTo(graphX + rowDataWidth, graphY + graphHeight);
+                        exportCtx.stroke();
+                        exportCtx.setLineDash([]);
+                        
+                        // Add "END" label
+                        exportCtx.fillStyle = '#888888';
+                        exportCtx.font = 'italic 10px Arial';
+                        exportCtx.fillText('(Recording End)', graphX + rowDataWidth + 10, graphY + graphHeight / 2 + 20);
+                    } else {
+                        exportCtx.fillText(formatTime(rowEndTime), exportWidth - 85, graphY + graphHeight / 2 + 5);
+                    }
                     
                     // Row number label
                     exportCtx.fillStyle = '#7f8c8d';
@@ -1098,29 +1124,39 @@ HTML_TEMPLATE = '''
                     exportCtx.fillStyle = '#666666';
                     exportCtx.font = '9px Arial';
                     const secondsInRow = (rowEndSample - rowStartSample) / SAMPLING_RATE;
-                    const timeMarkInterval = secondsInRow > 20 ? 5 : (secondsInRow > 10 ? 2 : 1);
+                    
+                    // Calculate actual width used by this row's data (maintain consistent scale)
+                    // Full rows use full graphWidth, partial rows use proportional width
+                    const actualRowWidth = (rowBuffer.length / samplesPerRow) * graphWidth;
+                    
+                    const timeMarkInterval = SECONDS_PER_ROW > 20 ? 5 : (SECONDS_PER_ROW > 10 ? 2 : 1);
+                    // Only draw time markers up to the actual data extent
                     for (let t = 0; t <= secondsInRow; t += timeMarkInterval) {
-                        const xPos = graphX + (t / secondsInRow) * graphWidth;
-                        const timeLabel = (rowStartTime + t).toFixed(1) + 's';
-                        exportCtx.fillText(timeLabel, xPos - 10, graphY - 3);
-                        
-                        // Small tick mark
-                        exportCtx.strokeStyle = '#999999';
-                        exportCtx.lineWidth = 1;
-                        exportCtx.beginPath();
-                        exportCtx.moveTo(xPos, graphY);
-                        exportCtx.lineTo(xPos, graphY + 5);
-                        exportCtx.stroke();
+                        const xPos = graphX + (t / SECONDS_PER_ROW) * graphWidth;
+                        if (xPos <= graphX + actualRowWidth + 5) {  // Only within data range
+                            const timeLabel = (rowStartTime + t).toFixed(1) + 's';
+                            exportCtx.fillText(timeLabel, xPos - 10, graphY - 3);
+                            
+                            // Small tick mark
+                            exportCtx.strokeStyle = '#999999';
+                            exportCtx.lineWidth = 1;
+                            exportCtx.beginPath();
+                            exportCtx.moveTo(xPos, graphY);
+                            exportCtx.lineTo(xPos, graphY + 5);
+                            exportCtx.stroke();
+                        }
                     }
                     
-                    // Draw ECG signal for this row
+                    // Draw ECG signal for this row - MAINTAIN CONSISTENT SCALE (no stretching)
                     if (rowBuffer.length >= 2) {
                         exportCtx.strokeStyle = '#00aa66';
                         exportCtx.lineWidth = 1.5;
                         exportCtx.beginPath();
                         
                         for (let i = 0; i < rowBuffer.length; i++) {
-                            const x = graphX + (i / rowBuffer.length) * graphWidth;
+                            // Use consistent pixels-per-sample ratio (based on full row samples)
+                            // This prevents stretching of partial rows
+                            const x = graphX + (i / samplesPerRow) * graphWidth;
                             const y = graphY + graphHeight - ((rowBuffer[i] - globalMinVal) / globalRange) * (graphHeight - 20) - 10;
                             
                             if (i === 0) {
@@ -1131,13 +1167,14 @@ HTML_TEMPLATE = '''
                         }
                         exportCtx.stroke();
                         
-                        // Draw R-peak markers for this row
+                        // Draw R-peak markers for this row - MAINTAIN CONSISTENT SCALE
                         annotations.forEach(ann => {
                             const globalIdx = ann.sample_index - startSample;
                             if (globalIdx >= rowStartSample && globalIdx < rowEndSample) {
                                 const localIdx = globalIdx - rowStartSample;
                                 if (localIdx >= 0 && localIdx < rowBuffer.length) {
-                                    const x = graphX + (localIdx / rowBuffer.length) * graphWidth;
+                                    // Use consistent pixels-per-sample ratio
+                                    const x = graphX + (localIdx / samplesPerRow) * graphWidth;
                                     const y = graphY + graphHeight - ((rowBuffer[localIdx] - globalMinVal) / globalRange) * (graphHeight - 20) - 10;
                                     
                                     // Check for false detection
