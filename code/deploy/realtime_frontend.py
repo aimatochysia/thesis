@@ -929,189 +929,267 @@ HTML_TEMPLATE = '''
         // ============================================================
         function exportECG(format = 'png') {
             // Export from 0 second to current realtime position (not just visible window)
+            // Multi-row and multi-part support for long recordings
             const startSample = 0;
             const endSample = currentIndex > 0 ? currentIndex : Math.min(DISPLAY_SAMPLES, ecgData.length);
             
             // Export dimension constants
-            const EXPORT_BASE_WIDTH = 1200;    // Base width in pixels for 5 seconds of recording
-            const EXPORT_BASE_SECONDS = 5;     // Reference duration for base width
-            const EXPORT_MAX_WIDTH = 10000;    // Maximum width to prevent memory issues
-            const EXPORT_HEIGHT = 600;         // Fixed height for consistent layout
+            const EXPORT_MAX_WIDTH = 10000;        // Maximum width per image
+            const EXPORT_MAX_HEIGHT = 10000;       // Maximum height before creating new part
+            const ROW_HEIGHT = 250;                // Height per ECG row (including labels)
+            const HEADER_HEIGHT = 90;              // Space for header
+            const FOOTER_HEIGHT = 80;              // Space for legend
+            const SECONDS_PER_ROW = 30;            // Seconds of data per row at max width
+            const PIXELS_PER_SECOND = EXPORT_MAX_WIDTH / SECONDS_PER_ROW;  // ~333 pixels per second
             
-            // Calculate dynamic canvas width based on total duration
-            // Scale proportionally: longer recordings get wider canvas (up to max)
             const totalSeconds = endSample / SAMPLING_RATE;
-            const scaledWidth = Math.round(EXPORT_BASE_WIDTH * (totalSeconds / EXPORT_BASE_SECONDS));
-            const exportWidth = Math.max(EXPORT_BASE_WIDTH, Math.min(EXPORT_MAX_WIDTH, scaledWidth));
-            const exportHeight = EXPORT_HEIGHT;
+            const totalSamples = endSample - startSample;
+            const samplesPerRow = Math.round(SECONDS_PER_ROW * SAMPLING_RATE);
+            const numRows = Math.ceil(totalSamples / samplesPerRow);
             
-            // Create a new canvas for export
-            const exportCanvas = document.createElement('canvas');
-            exportCanvas.width = exportWidth;
-            exportCanvas.height = exportHeight;
-            const exportCtx = exportCanvas.getContext('2d');
-            
-            // White background for medical printing
-            exportCtx.fillStyle = '#ffffff';
-            exportCtx.fillRect(0, 0, exportWidth, exportHeight);
-            
-            // Header section
-            exportCtx.fillStyle = '#333333';
-            exportCtx.font = 'bold 18px Arial';
-            exportCtx.fillText('ECG Analysis Report - Complete Recording', 20, 30);
-            
-            exportCtx.font = '12px Arial';
-            exportCtx.fillStyle = '#666666';
-            const modelName = document.getElementById('modelName').textContent;
-            const timestamp = new Date().toISOString();
-            exportCtx.fillText('Model: ' + modelName, 20, 50);
-            exportCtx.fillText('Timestamp: ' + timestamp, 20, 68);
+            // Calculate rows per part (image)
+            const maxRowsPerPart = Math.floor((EXPORT_MAX_HEIGHT - HEADER_HEIGHT - FOOTER_HEIGHT) / ROW_HEIGHT);
+            const numParts = Math.ceil(numRows / maxRowsPerPart);
             
             // Get COMPLETE data from 0 to current position
-            let buffer = [];
+            let fullBuffer = [];
             for (let i = startSample; i < endSample && i < ecgData.length; i++) {
-                buffer.push(ecgData[i]);
+                fullBuffer.push(ecgData[i]);
             }
             
-            const timeStart = (startSample / SAMPLING_RATE).toFixed(2);
-            const timeEnd = (endSample / SAMPLING_RATE).toFixed(2);
-            exportCtx.fillText('Time Range: ' + timeStart + 's - ' + timeEnd + 's (Complete Recording)', 300, 50);
-            exportCtx.fillText('Total Duration: ' + totalSeconds.toFixed(2) + 's | Samples: ' + buffer.length, 300, 68);
+            // Find global min/max for consistent scaling across all rows/parts
+            const globalMinVal = Math.min(...fullBuffer);
+            const globalMaxVal = Math.max(...fullBuffer);
+            const globalRange = globalMaxVal - globalMinVal || 1;
             
-            // Graph area
-            const graphX = 50;
-            const graphY = 90;
-            const graphWidth = exportWidth - 100;
-            const graphHeight = exportHeight - 180;
+            const modelName = document.getElementById('modelName').textContent;
+            const timestamp = new Date().toISOString();
             
-            // Graph border
-            exportCtx.strokeStyle = '#cccccc';
-            exportCtx.lineWidth = 1;
-            exportCtx.strokeRect(graphX, graphY, graphWidth, graphHeight);
+            console.log(`[ECG] Exporting ${totalSeconds.toFixed(2)}s recording: ${numRows} rows across ${numParts} part(s)`);
             
-            // Medical ECG grid constants (based on standard ECG paper)
-            const GRID_MIN_SPACING = 10;       // Minimum pixel spacing for readability
-            const GRID_BASE_SPACING = 20;      // Base small grid spacing (1mm on ECG paper)
-            const GRID_LARGE_MULTIPLIER = 5;   // Large grid = 5x small grid (5mm on ECG paper)
-            
-            // Adjust grid spacing for longer recordings to maintain visibility
-            const gridSpacingSmall = Math.max(GRID_MIN_SPACING, Math.round(GRID_BASE_SPACING * EXPORT_BASE_WIDTH / exportWidth));
-            const gridSpacingLarge = gridSpacingSmall * GRID_LARGE_MULTIPLIER;
-            
-            exportCtx.strokeStyle = '#ffcccc';
-            exportCtx.lineWidth = 0.5;
-            for (let x = graphX; x <= graphX + graphWidth; x += gridSpacingSmall) {
-                exportCtx.beginPath();
-                exportCtx.moveTo(x, graphY);
-                exportCtx.lineTo(x, graphY + graphHeight);
-                exportCtx.stroke();
-            }
-            for (let y = graphY; y <= graphY + graphHeight; y += GRID_BASE_SPACING) {
-                exportCtx.beginPath();
-                exportCtx.moveTo(graphX, y);
-                exportCtx.lineTo(graphX + graphWidth, y);
-                exportCtx.stroke();
-            }
-            
-            // Large grid
-            exportCtx.strokeStyle = '#ff9999';
-            exportCtx.lineWidth = 1;
-            for (let x = graphX; x <= graphX + graphWidth; x += gridSpacingLarge) {
-                exportCtx.beginPath();
-                exportCtx.moveTo(x, graphY);
-                exportCtx.lineTo(x, graphY + graphHeight);
-                exportCtx.stroke();
-            }
-            for (let y = graphY; y <= graphY + graphHeight; y += 100) {
-                exportCtx.beginPath();
-                exportCtx.moveTo(graphX, y);
-                exportCtx.lineTo(graphX + graphWidth, y);
-                exportCtx.stroke();
-            }
-            
-            // Draw ECG signal
-            if (buffer.length >= 2) {
-                const minVal = Math.min(...buffer);
-                const maxVal = Math.max(...buffer);
-                const range = maxVal - minVal || 1;
+            // Generate each part
+            for (let partIdx = 0; partIdx < numParts; partIdx++) {
+                const rowsInThisPart = Math.min(maxRowsPerPart, numRows - partIdx * maxRowsPerPart);
+                const exportWidth = EXPORT_MAX_WIDTH;
+                const exportHeight = HEADER_HEIGHT + rowsInThisPart * ROW_HEIGHT + FOOTER_HEIGHT;
                 
-                exportCtx.strokeStyle = '#00aa66';
-                exportCtx.lineWidth = 1.5;
-                exportCtx.beginPath();
+                // Create canvas for this part
+                const exportCanvas = document.createElement('canvas');
+                exportCanvas.width = exportWidth;
+                exportCanvas.height = exportHeight;
+                const exportCtx = exportCanvas.getContext('2d');
                 
-                for (let i = 0; i < buffer.length; i++) {
-                    const x = graphX + (i / buffer.length) * graphWidth;
-                    const y = graphY + graphHeight - ((buffer[i] - minVal) / range) * (graphHeight - 20) - 10;
+                // White background for medical printing
+                exportCtx.fillStyle = '#ffffff';
+                exportCtx.fillRect(0, 0, exportWidth, exportHeight);
+                
+                // Header section
+                exportCtx.fillStyle = '#333333';
+                exportCtx.font = 'bold 18px Arial';
+                const partLabel = numParts > 1 ? ` (Part ${partIdx + 1} of ${numParts})` : '';
+                exportCtx.fillText('ECG Analysis Report - Complete Recording' + partLabel, 20, 30);
+                
+                exportCtx.font = '12px Arial';
+                exportCtx.fillStyle = '#666666';
+                exportCtx.fillText('Model: ' + modelName, 20, 50);
+                exportCtx.fillText('Timestamp: ' + timestamp, 20, 68);
+                
+                // Calculate time range for this part
+                const partStartRow = partIdx * maxRowsPerPart;
+                const partEndRow = partStartRow + rowsInThisPart;
+                const partStartSample = partStartRow * samplesPerRow;
+                const partEndSample = Math.min(partEndRow * samplesPerRow, totalSamples);
+                const partStartTime = (partStartSample / SAMPLING_RATE).toFixed(2);
+                const partEndTime = (partEndSample / SAMPLING_RATE).toFixed(2);
+                
+                exportCtx.fillText(`Time Range: ${partStartTime}s - ${partEndTime}s | Total: ${totalSeconds.toFixed(2)}s`, 300, 50);
+                exportCtx.fillText(`Rows ${partStartRow + 1}-${partEndRow} of ${numRows} | ${SECONDS_PER_ROW}s per row`, 300, 68);
+                
+                // Draw each row in this part
+                for (let rowInPart = 0; rowInPart < rowsInThisPart; rowInPart++) {
+                    const globalRowIdx = partStartRow + rowInPart;
+                    const rowStartSample = globalRowIdx * samplesPerRow;
+                    const rowEndSample = Math.min(rowStartSample + samplesPerRow, totalSamples);
                     
-                    if (i === 0) {
-                        exportCtx.moveTo(x, y);
-                    } else {
-                        exportCtx.lineTo(x, y);
+                    if (rowStartSample >= totalSamples) break;
+                    
+                    // Get buffer slice for this row
+                    const rowBuffer = fullBuffer.slice(rowStartSample, rowEndSample);
+                    if (rowBuffer.length === 0) continue;
+                    
+                    // Row dimensions
+                    const graphX = 100;  // More space for time labels
+                    const graphY = HEADER_HEIGHT + rowInPart * ROW_HEIGHT + 30;
+                    const graphWidth = exportWidth - 120;
+                    const graphHeight = ROW_HEIGHT - 50;
+                    
+                    // Time labels for this row (clear for doctors)
+                    const rowStartTime = (rowStartSample / SAMPLING_RATE);
+                    const rowEndTime = (rowEndSample / SAMPLING_RATE);
+                    
+                    exportCtx.fillStyle = '#1a5276';
+                    exportCtx.font = 'bold 14px Arial';
+                    exportCtx.fillText(formatTime(rowStartTime), 10, graphY + graphHeight / 2 + 5);
+                    exportCtx.fillText(formatTime(rowEndTime), exportWidth - 85, graphY + graphHeight / 2 + 5);
+                    
+                    // Row number label
+                    exportCtx.fillStyle = '#7f8c8d';
+                    exportCtx.font = '10px Arial';
+                    exportCtx.fillText(`Row ${globalRowIdx + 1}`, 10, graphY - 5);
+                    
+                    // Graph border
+                    exportCtx.strokeStyle = '#cccccc';
+                    exportCtx.lineWidth = 1;
+                    exportCtx.strokeRect(graphX, graphY, graphWidth, graphHeight);
+                    
+                    // Medical ECG grid (red)
+                    const gridSpacingSmall = 15;
+                    const gridSpacingLarge = 75;
+                    
+                    exportCtx.strokeStyle = '#ffcccc';
+                    exportCtx.lineWidth = 0.5;
+                    for (let x = graphX; x <= graphX + graphWidth; x += gridSpacingSmall) {
+                        exportCtx.beginPath();
+                        exportCtx.moveTo(x, graphY);
+                        exportCtx.lineTo(x, graphY + graphHeight);
+                        exportCtx.stroke();
+                    }
+                    for (let y = graphY; y <= graphY + graphHeight; y += gridSpacingSmall) {
+                        exportCtx.beginPath();
+                        exportCtx.moveTo(graphX, y);
+                        exportCtx.lineTo(graphX + graphWidth, y);
+                        exportCtx.stroke();
+                    }
+                    
+                    // Large grid
+                    exportCtx.strokeStyle = '#ff9999';
+                    exportCtx.lineWidth = 1;
+                    for (let x = graphX; x <= graphX + graphWidth; x += gridSpacingLarge) {
+                        exportCtx.beginPath();
+                        exportCtx.moveTo(x, graphY);
+                        exportCtx.lineTo(x, graphY + graphHeight);
+                        exportCtx.stroke();
+                    }
+                    
+                    // Time markers along top of each row
+                    exportCtx.fillStyle = '#666666';
+                    exportCtx.font = '9px Arial';
+                    const secondsInRow = (rowEndSample - rowStartSample) / SAMPLING_RATE;
+                    const timeMarkInterval = secondsInRow > 20 ? 5 : (secondsInRow > 10 ? 2 : 1);
+                    for (let t = 0; t <= secondsInRow; t += timeMarkInterval) {
+                        const xPos = graphX + (t / secondsInRow) * graphWidth;
+                        const timeLabel = (rowStartTime + t).toFixed(1) + 's';
+                        exportCtx.fillText(timeLabel, xPos - 10, graphY - 3);
+                        
+                        // Small tick mark
+                        exportCtx.strokeStyle = '#999999';
+                        exportCtx.lineWidth = 1;
+                        exportCtx.beginPath();
+                        exportCtx.moveTo(xPos, graphY);
+                        exportCtx.lineTo(xPos, graphY + 5);
+                        exportCtx.stroke();
+                    }
+                    
+                    // Draw ECG signal for this row
+                    if (rowBuffer.length >= 2) {
+                        exportCtx.strokeStyle = '#00aa66';
+                        exportCtx.lineWidth = 1.5;
+                        exportCtx.beginPath();
+                        
+                        for (let i = 0; i < rowBuffer.length; i++) {
+                            const x = graphX + (i / rowBuffer.length) * graphWidth;
+                            const y = graphY + graphHeight - ((rowBuffer[i] - globalMinVal) / globalRange) * (graphHeight - 20) - 10;
+                            
+                            if (i === 0) {
+                                exportCtx.moveTo(x, y);
+                            } else {
+                                exportCtx.lineTo(x, y);
+                            }
+                        }
+                        exportCtx.stroke();
+                        
+                        // Draw R-peak markers for this row
+                        annotations.forEach(ann => {
+                            const globalIdx = ann.sample_index - startSample;
+                            if (globalIdx >= rowStartSample && globalIdx < rowEndSample) {
+                                const localIdx = globalIdx - rowStartSample;
+                                if (localIdx >= 0 && localIdx < rowBuffer.length) {
+                                    const x = graphX + (localIdx / rowBuffer.length) * graphWidth;
+                                    const y = graphY + graphHeight - ((rowBuffer[localIdx] - globalMinVal) / globalRange) * (graphHeight - 20) - 10;
+                                    
+                                    // Check for false detection
+                                    const classResult = classifications.find(c => c.r_peak === ann.sample_index);
+                                    if (classResult && classResult.correct === false) {
+                                        exportCtx.strokeStyle = '#cc8800';
+                                        exportCtx.lineWidth = 2;
+                                        exportCtx.beginPath();
+                                        exportCtx.arc(x, y, 6, 0, Math.PI * 2);
+                                        exportCtx.stroke();
+                                    }
+                                    
+                                    // R-peak marker
+                                    exportCtx.fillStyle = ann.beat_type === 'N' ? '#00aa66' : '#cc3333';
+                                    exportCtx.beginPath();
+                                    exportCtx.arc(x, y, 3, 0, Math.PI * 2);
+                                    exportCtx.fill();
+                                }
+                            }
+                        });
                     }
                 }
-                exportCtx.stroke();
                 
-                // Draw R-peak markers
-                annotations.forEach(ann => {
-                    if (ann.sample_index >= startSample && ann.sample_index <= endSample) {
-                        const bufferIdx = ann.sample_index - startSample;
-                        if (bufferIdx >= 0 && bufferIdx < buffer.length) {
-                            const x = graphX + (bufferIdx / buffer.length) * graphWidth;
-                            const y = graphY + graphHeight - ((buffer[bufferIdx] - minVal) / range) * (graphHeight - 20) - 10;
-                            
-                            // Check for false detection
-                            const classResult = classifications.find(c => c.r_peak === ann.sample_index);
-                            if (classResult && classResult.correct === false) {
-                                exportCtx.strokeStyle = '#cc8800';
-                                exportCtx.lineWidth = 2;
-                                exportCtx.beginPath();
-                                exportCtx.arc(x, y, 8, 0, Math.PI * 2);
-                                exportCtx.stroke();
-                            }
-                            
-                            // R-peak marker
-                            exportCtx.fillStyle = ann.beat_type === 'N' ? '#00aa66' : '#cc3333';
-                            exportCtx.beginPath();
-                            exportCtx.arc(x, y, 4, 0, Math.PI * 2);
-                            exportCtx.fill();
-                        }
-                    }
-                });
+                // Legend at bottom
+                const legendY = exportHeight - 50;
+                exportCtx.font = '11px Arial';
+                exportCtx.fillStyle = '#00aa66';
+                exportCtx.beginPath();
+                exportCtx.arc(60, legendY, 5, 0, Math.PI * 2);
+                exportCtx.fill();
+                exportCtx.fillStyle = '#333333';
+                exportCtx.fillText('Normal Beat', 72, legendY + 4);
+                
+                exportCtx.fillStyle = '#cc3333';
+                exportCtx.beginPath();
+                exportCtx.arc(180, legendY, 5, 0, Math.PI * 2);
+                exportCtx.fill();
+                exportCtx.fillStyle = '#333333';
+                exportCtx.fillText('Abnormal Beat', 192, legendY + 4);
+                
+                exportCtx.strokeStyle = '#cc8800';
+                exportCtx.lineWidth = 2;
+                exportCtx.beginPath();
+                exportCtx.arc(320, legendY, 7, 0, Math.PI * 2);
+                exportCtx.stroke();
+                exportCtx.fillStyle = '#333333';
+                exportCtx.fillText('False Detection', 335, legendY + 4);
+                
+                // Scale info
+                exportCtx.fillStyle = '#666666';
+                exportCtx.font = '10px Arial';
+                exportCtx.fillText(`Scale: ${SECONDS_PER_ROW}s per row | Sampling: ${SAMPLING_RATE}Hz`, 450, legendY + 4);
+                
+                // Create download link for this part
+                const partSuffix = numParts > 1 ? `_part${partIdx + 1}` : '';
+                const dataURL = exportCanvas.toDataURL('image/' + format, 0.95);
+                const link = document.createElement('a');
+                link.download = 'ecg_complete_' + timestamp.replace(/[:.]/g, '-') + partSuffix + '.' + format;
+                link.href = dataURL;
+                link.click();
+                
+                console.log(`[ECG] Exported part ${partIdx + 1}/${numParts} as ${format.toUpperCase()}`);
             }
             
-            // Legend
-            const legendY = exportHeight - 70;
-            exportCtx.font = '11px Arial';
-            exportCtx.fillStyle = '#00aa66';
-            exportCtx.beginPath();
-            exportCtx.arc(60, legendY, 5, 0, Math.PI * 2);
-            exportCtx.fill();
-            exportCtx.fillStyle = '#333333';
-            exportCtx.fillText('Normal Beat', 72, legendY + 4);
-            
-            exportCtx.fillStyle = '#cc3333';
-            exportCtx.beginPath();
-            exportCtx.arc(180, legendY, 5, 0, Math.PI * 2);
-            exportCtx.fill();
-            exportCtx.fillStyle = '#333333';
-            exportCtx.fillText('Abnormal Beat', 192, legendY + 4);
-            
-            exportCtx.strokeStyle = '#cc8800';
-            exportCtx.lineWidth = 2;
-            exportCtx.beginPath();
-            exportCtx.arc(320, legendY, 7, 0, Math.PI * 2);
-            exportCtx.stroke();
-            exportCtx.fillStyle = '#333333';
-            exportCtx.fillText('False Detection', 335, legendY + 4);
-            
-            // Create download link
-            const dataURL = exportCanvas.toDataURL('image/' + format, 0.95);
-            const link = document.createElement('a');
-            link.download = 'ecg_complete_' + timestamp.replace(/[:.]/g, '-') + '.' + format;
-            link.href = dataURL;
-            link.click();
-            
-            console.log('[ECG] Exported complete recording as ' + format.toUpperCase() + ' (0s to ' + timeEnd + 's)');
+            console.log('[ECG] Export complete: ' + numParts + ' file(s) generated');
+        }
+        
+        // Helper function to format time as MM:SS.s for clear doctor readability
+        function formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = (seconds % 60).toFixed(1);
+            if (mins > 0) {
+                return `${mins}:${secs.padStart(4, '0')}`;
+            }
+            return `${secs}s`;
         }
         
         // Draw beat waveform on the beat snapshot canvas
