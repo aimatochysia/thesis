@@ -1,0 +1,124 @@
+@startuml ECG Classification Pipeline Activity Diagram
+
+' Title and skin parameters
+title ECG Classification Pipeline\nFrom MIT-BIH Data Gathering to Deployment
+skinparam backgroundColor #FFFFFF
+skinparam swimlaneWidth 200
+skinparam activityBackgroundColor #E8F4FC
+skinparam activityBorderColor #1E88E5
+skinparam activityStartColor #4CAF50
+skinparam activityEndColor #F44336
+
+|Data Gathering|
+start
+:Load MIT-BIH Arrhythmia Database;
+note right
+  48 records from 
+  PhysioNet database
+  Sampling rate: 360 Hz
+end note
+
+:Parse ECG signals (MLII lead);
+
+:Load annotation files;
+note right
+  R-peak locations
+  Beat type labels
+  (N, V, A, L, R, etc.)
+end note
+
+|Data Modification|
+:Apply Pan-Tompkins R-peak detection;
+
+:Extract beats around R-peaks;
+note right
+  200 samples per beat
+  (90 pre-R + 110 post-R)
+end note
+
+:Skip Record 119;
+note right #FFCCCC
+  **Record 119 completely excluded**
+  Reserved for live testing
+  and deployment validation
+  (47 records used for training)
+end note
+
+:Create 7-beat context windows;
+note right
+  3 previous + 1 center + 3 subsequent
+  Shape: (7, 200)
+end note
+
+:Apply binary labeling;
+note right
+  N = Normal (0)
+  Others = Abnormal (1)
+end note
+
+:Record-wise train/val/test split;
+note right
+  70% train / 15% val / 15% test
+  **No patient leakage**
+end note
+
+:Normalize with StandardScaler;
+note right
+  Fitted on training data ONLY
+end note
+
+|AI Modeling|
+:Build Context-Aware CNN1D Model (v6);
+note right
+  Input: (batch, 7, 200)
+  7 beats as channels
+  1D convolutions
+end note
+
+:Train with class weights;
+note right
+  Handle imbalanced classes
+  Use CrossEntropyLoss
+end note
+
+:Validate on held-out records;
+
+:Evaluate on test records;
+
+:Export model to ONNX format;
+note right
+  context_ecg_model.onnx
+  context_ecg_scaler.pkl
+end note
+
+|Result / Deployment|
+:Deploy realtime_frontend.py;
+note right
+  Flask web application
+  Real-time ECG visualization
+end note
+
+:Load Record 119 for testing;
+note right #CCFFCC
+  **True unseen validation**
+  This record was never used
+  during training or validation
+end note
+
+:Real-time beat classification;
+note right
+  7-beat rolling buffer
+  ONNX Runtime inference
+end note
+
+:Display results with accuracy;
+
+:Export complete ECG to PNG/JPEG;
+note right
+  From 0 second to current
+  realtime position
+end note
+
+stop
+
+@enduml

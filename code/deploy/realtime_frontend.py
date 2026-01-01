@@ -928,7 +928,16 @@ HTML_TEMPLATE = '''
         // EXPORT TO MEDICAL IMAGE
         // ============================================================
         function exportECG(format = 'png') {
-            const exportWidth = 1200;
+            // Export from 0 second to current realtime position (not just visible window)
+            const startSample = 0;
+            const endSample = currentIndex > 0 ? currentIndex : Math.min(DISPLAY_SAMPLES, ecgData.length);
+            
+            // Calculate dynamic canvas width based on total duration
+            // Base: 1200px for 5 seconds, scale proportionally for longer durations
+            const totalSeconds = endSample / SAMPLING_RATE;
+            const baseWidth = 1200;
+            const baseSeconds = 5;
+            const exportWidth = Math.max(baseWidth, Math.min(10000, Math.round(baseWidth * (totalSeconds / baseSeconds))));
             const exportHeight = 600;
             
             // Create a new canvas for export
@@ -944,7 +953,7 @@ HTML_TEMPLATE = '''
             // Header section
             exportCtx.fillStyle = '#333333';
             exportCtx.font = 'bold 18px Arial';
-            exportCtx.fillText('ECG Analysis Report', 20, 30);
+            exportCtx.fillText('ECG Analysis Report - Complete Recording', 20, 30);
             
             exportCtx.font = '12px Arial';
             exportCtx.fillStyle = '#666666';
@@ -953,9 +962,7 @@ HTML_TEMPLATE = '''
             exportCtx.fillText('Model: ' + modelName, 20, 50);
             exportCtx.fillText('Timestamp: ' + timestamp, 20, 68);
             
-            // Get display window
-            let endSample = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
-            let startSample = Math.max(0, endSample - DISPLAY_SAMPLES);
+            // Get COMPLETE data from 0 to current position
             let buffer = [];
             for (let i = startSample; i < endSample && i < ecgData.length; i++) {
                 buffer.push(ecgData[i]);
@@ -963,7 +970,8 @@ HTML_TEMPLATE = '''
             
             const timeStart = (startSample / SAMPLING_RATE).toFixed(2);
             const timeEnd = (endSample / SAMPLING_RATE).toFixed(2);
-            exportCtx.fillText('Time Range: ' + timeStart + 's - ' + timeEnd + 's', 300, 50);
+            exportCtx.fillText('Time Range: ' + timeStart + 's - ' + timeEnd + 's (Complete Recording)', 300, 50);
+            exportCtx.fillText('Total Duration: ' + totalSeconds.toFixed(2) + 's | Samples: ' + buffer.length, 300, 68);
             
             // Graph area
             const graphX = 50;
@@ -976,10 +984,13 @@ HTML_TEMPLATE = '''
             exportCtx.lineWidth = 1;
             exportCtx.strokeRect(graphX, graphY, graphWidth, graphHeight);
             
-            // Medical ECG grid (red)
+            // Medical ECG grid (red) - adjust grid spacing for longer recordings
+            const gridSpacingSmall = Math.max(10, Math.round(20 * baseWidth / exportWidth));
+            const gridSpacingLarge = gridSpacingSmall * 5;
+            
             exportCtx.strokeStyle = '#ffcccc';
             exportCtx.lineWidth = 0.5;
-            for (let x = graphX; x <= graphX + graphWidth; x += 20) {
+            for (let x = graphX; x <= graphX + graphWidth; x += gridSpacingSmall) {
                 exportCtx.beginPath();
                 exportCtx.moveTo(x, graphY);
                 exportCtx.lineTo(x, graphY + graphHeight);
@@ -995,7 +1006,7 @@ HTML_TEMPLATE = '''
             // Large grid
             exportCtx.strokeStyle = '#ff9999';
             exportCtx.lineWidth = 1;
-            for (let x = graphX; x <= graphX + graphWidth; x += 100) {
+            for (let x = graphX; x <= graphX + graphWidth; x += gridSpacingLarge) {
                 exportCtx.beginPath();
                 exportCtx.moveTo(x, graphY);
                 exportCtx.lineTo(x, graphY + graphHeight);
@@ -1032,7 +1043,7 @@ HTML_TEMPLATE = '''
                 
                 // Draw R-peak markers
                 annotations.forEach(ann => {
-                    if (ann.sample_index > startSample && ann.sample_index <= endSample) {
+                    if (ann.sample_index >= startSample && ann.sample_index <= endSample) {
                         const bufferIdx = ann.sample_index - startSample;
                         if (bufferIdx >= 0 && bufferIdx < buffer.length) {
                             const x = graphX + (bufferIdx / buffer.length) * graphWidth;
@@ -1086,11 +1097,11 @@ HTML_TEMPLATE = '''
             // Create download link
             const dataURL = exportCanvas.toDataURL('image/' + format, 0.95);
             const link = document.createElement('a');
-            link.download = 'ecg_export_' + timestamp.replace(/[:.]/g, '-') + '.' + format;
+            link.download = 'ecg_complete_' + timestamp.replace(/[:.]/g, '-') + '.' + format;
             link.href = dataURL;
             link.click();
             
-            console.log('[ECG] Exported ' + format.toUpperCase() + ' image');
+            console.log('[ECG] Exported complete recording as ' + format.toUpperCase() + ' (0s to ' + timeEnd + 's)');
         }
         
         // Draw beat waveform on the beat snapshot canvas
