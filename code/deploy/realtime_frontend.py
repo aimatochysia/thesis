@@ -484,9 +484,11 @@ HTML_TEMPLATE = '''
         }
         #ecgCanvas {
             width: 100%;
+            min-height: 300px;
             height: 300px;
             background: #0a0a1a;
             border-radius: 10px;
+            transition: height 0.3s ease;
         }
         .time-display {
             text-align: center;
@@ -775,6 +777,11 @@ HTML_TEMPLATE = '''
         let currentRPeakPos = 70;  // R-peak position in beat waveform
         let currentBeatLength = 188;  // Beat length
         
+        // Graph height tracking - expand but never shrink for better readability
+        let maxGraphHeight = 300;  // Track maximum height achieved
+        const MIN_GRAPH_HEIGHT = 300;  // Minimum height
+        const MAX_GRAPH_HEIGHT = 800;  // Maximum allowed height
+        
         // History navigation
         let viewOffset = 0;  // 0 = live view, negative = viewing history
         let isLive = true;
@@ -851,8 +858,24 @@ HTML_TEMPLATE = '''
             }
         }
         
+        // Update graph height dynamically - can expand but never shrinks
+        function updateGraphHeight(requestedHeight) {
+            const newHeight = Math.max(MIN_GRAPH_HEIGHT, Math.min(MAX_GRAPH_HEIGHT, requestedHeight));
+            if (newHeight > maxGraphHeight) {
+                maxGraphHeight = newHeight;
+                canvas.style.height = maxGraphHeight + 'px';
+                resizeCanvas();
+            }
+        }
+        
         // Resize canvas to be pixel-perfect
         function resizeCanvas() {
+            // Ensure canvas height never shrinks below max achieved
+            const currentCSSHeight = parseInt(canvas.style.height) || MIN_GRAPH_HEIGHT;
+            if (currentCSSHeight < maxGraphHeight) {
+                canvas.style.height = maxGraphHeight + 'px';
+            }
+            
             const rect = canvas.getBoundingClientRect();
             canvas.width = rect.width * window.devicePixelRatio;
             canvas.height = rect.height * window.devicePixelRatio;
@@ -1303,6 +1326,25 @@ HTML_TEMPLATE = '''
             const minVal = Math.min(...buffer);
             const maxVal = Math.max(...buffer);
             const range = maxVal - minVal || 1;
+            
+            // Dynamic height expansion based on signal amplitude and content
+            // Count visible annotations to determine if we need more height
+            let visibleAnnotations = 0;
+            annotations.forEach(ann => {
+                if (ann.sample_index > startSample && ann.sample_index <= endSample) {
+                    visibleAnnotations++;
+                }
+            });
+            
+            // Expand height if many annotations or high signal variance
+            // More annotations = more markers = need more height for clarity
+            const baseHeight = MIN_GRAPH_HEIGHT;
+            const heightPerAnnotation = 5;  // Add 5px per visible annotation (up to limit)
+            const annotationBonus = Math.min(visibleAnnotations * heightPerAnnotation, 200);
+            const desiredHeight = baseHeight + annotationBonus;
+            
+            // Update graph height (will only expand, never shrink)
+            updateGraphHeight(desiredHeight);
             
             // Draw ECG line
             ctx.strokeStyle = '#00ff88';
