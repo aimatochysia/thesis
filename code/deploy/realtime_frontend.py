@@ -932,13 +932,18 @@ HTML_TEMPLATE = '''
             const startSample = 0;
             const endSample = currentIndex > 0 ? currentIndex : Math.min(DISPLAY_SAMPLES, ecgData.length);
             
+            // Export dimension constants
+            const EXPORT_BASE_WIDTH = 1200;    // Base width in pixels for 5 seconds of recording
+            const EXPORT_BASE_SECONDS = 5;     // Reference duration for base width
+            const EXPORT_MAX_WIDTH = 10000;    // Maximum width to prevent memory issues
+            const EXPORT_HEIGHT = 600;         // Fixed height for consistent layout
+            
             // Calculate dynamic canvas width based on total duration
-            // Base: 1200px for 5 seconds, scale proportionally for longer durations
+            // Scale proportionally: longer recordings get wider canvas (up to max)
             const totalSeconds = endSample / SAMPLING_RATE;
-            const baseWidth = 1200;
-            const baseSeconds = 5;
-            const exportWidth = Math.max(baseWidth, Math.min(10000, Math.round(baseWidth * (totalSeconds / baseSeconds))));
-            const exportHeight = 600;
+            const scaledWidth = Math.round(EXPORT_BASE_WIDTH * (totalSeconds / EXPORT_BASE_SECONDS));
+            const exportWidth = Math.max(EXPORT_BASE_WIDTH, Math.min(EXPORT_MAX_WIDTH, scaledWidth));
+            const exportHeight = EXPORT_HEIGHT;
             
             // Create a new canvas for export
             const exportCanvas = document.createElement('canvas');
@@ -984,9 +989,14 @@ HTML_TEMPLATE = '''
             exportCtx.lineWidth = 1;
             exportCtx.strokeRect(graphX, graphY, graphWidth, graphHeight);
             
-            // Medical ECG grid (red) - adjust grid spacing for longer recordings
-            const gridSpacingSmall = Math.max(10, Math.round(20 * baseWidth / exportWidth));
-            const gridSpacingLarge = gridSpacingSmall * 5;
+            // Medical ECG grid constants (based on standard ECG paper)
+            const GRID_MIN_SPACING = 10;       // Minimum pixel spacing for readability
+            const GRID_BASE_SPACING = 20;      // Base small grid spacing (1mm on ECG paper)
+            const GRID_LARGE_MULTIPLIER = 5;   // Large grid = 5x small grid (5mm on ECG paper)
+            
+            // Adjust grid spacing for longer recordings to maintain visibility
+            const gridSpacingSmall = Math.max(GRID_MIN_SPACING, Math.round(GRID_BASE_SPACING * EXPORT_BASE_WIDTH / exportWidth));
+            const gridSpacingLarge = gridSpacingSmall * GRID_LARGE_MULTIPLIER;
             
             exportCtx.strokeStyle = '#ffcccc';
             exportCtx.lineWidth = 0.5;
@@ -996,7 +1006,7 @@ HTML_TEMPLATE = '''
                 exportCtx.lineTo(x, graphY + graphHeight);
                 exportCtx.stroke();
             }
-            for (let y = graphY; y <= graphY + graphHeight; y += 20) {
+            for (let y = graphY; y <= graphY + graphHeight; y += GRID_BASE_SPACING) {
                 exportCtx.beginPath();
                 exportCtx.moveTo(graphX, y);
                 exportCtx.lineTo(graphX + graphWidth, y);
