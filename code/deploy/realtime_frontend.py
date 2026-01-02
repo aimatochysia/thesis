@@ -699,10 +699,14 @@ HTML_TEMPLATE = '''
                 <button id="fwdBtn" onclick="scrollHistory(1)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">▶ +1s</button>
                 <button id="fwd5Btn" onclick="scrollHistory(5)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">⏩ +5s</button>
                 <span style="margin: 0 10px; color: #444;">|</span>
-                <button onclick="exportECG('png')" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;">📷 Export PNG</button>
-                <button onclick="exportECG('jpeg')" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;">📄 Export JPEG</button>
+                <button onclick="downloadAllBatches()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;">📦 Download Batches</button>
+                <button onclick="exportUnsaved('png')" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,215,0,0.1); border: 1px solid rgba(255,215,0,0.3); color: #ffd700; cursor: pointer;">⏳ Export Unsaved</button>
+                <button onclick="forceSaveBatch()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">💾 Save Now</button>
             </div>
-            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 8px;">💡 Drag the graph to scroll through history</p>
+            <div id="batchStatus" style="text-align: center; margin-top: 8px; font-size: 12px;">
+                <span style="color: #888;">📦 Auto-batch: saves every 2 minutes</span>
+            </div>
+            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 5px;">💡 Drag the graph to scroll through history | Batches auto-save for faster export</p>
         </div>
         
         <!-- Beat Snapshot Panel - Shows the current beat segment sent to ONNX model -->
@@ -796,6 +800,16 @@ HTML_TEMPLATE = '''
         const SAMPLING_RATE = 360;
         const DISPLAY_SECONDS = 5;
         const DISPLAY_SAMPLES = SAMPLING_RATE * DISPLAY_SECONDS;
+        
+        // ============================================================
+        // AUTO-BATCH EXPORT SYSTEM
+        // ============================================================
+        // Automatically saves batches during recording for faster export
+        const AUTO_BATCH_INTERVAL_SECONDS = 120;  // Auto-save every 2 minutes
+        const AUTO_BATCH_INTERVAL_SAMPLES = AUTO_BATCH_INTERVAL_SECONDS * SAMPLING_RATE;
+        let savedBatches = [];  // Array of {startSample, endSample, dataURL, timestamp}
+        let lastBatchEndSample = 0;  // Track where last batch ended
+        let autoBatchEnabled = true;  // Toggle for auto-batch feature
         
         // Speed control
         function setSpeed(speed) {
@@ -1252,6 +1266,297 @@ HTML_TEMPLATE = '''
             return `${secs}s`;
         }
         
+        // ============================================================
+        // AUTO-BATCH FUNCTIONS
+        // ============================================================
+        
+        // Check if it's time to auto-save a batch
+        function checkAutoBatch() {
+            if (!autoBatchEnabled) return;
+            
+            // Check if we've accumulated enough new data for a batch
+            const unsavedSamples = currentIndex - lastBatchEndSample;
+            if (unsavedSamples >= AUTO_BATCH_INTERVAL_SAMPLES) {
+                saveBatch(lastBatchEndSample, currentIndex);
+            }
+        }
+        
+        // Save a batch of ECG data as an image (stored in memory, not downloaded)
+        function saveBatch(startSample, endSample) {
+            if (endSample <= startSample) return;
+            
+            const batchNum = savedBatches.length + 1;
+            console.log(`[ECG] Auto-saving batch ${batchNum}: samples ${startSample} to ${endSample}`);
+            
+            // Generate batch image
+            const batchCanvas = generateBatchCanvas(startSample, endSample, batchNum);
+            const dataURL = batchCanvas.toDataURL('image/png', 0.95);
+            
+            // Store batch metadata
+            savedBatches.push({
+                batchNum: batchNum,
+                startSample: startSample,
+                endSample: endSample,
+                startTime: startSample / SAMPLING_RATE,
+                endTime: endSample / SAMPLING_RATE,
+                dataURL: dataURL,
+                timestamp: new Date().toISOString()
+            });
+            
+            lastBatchEndSample = endSample;
+            updateBatchStatus();
+            
+            console.log(`[ECG] Batch ${batchNum} saved (${((endSample - startSample) / SAMPLING_RATE).toFixed(1)}s)`);
+        }
+        
+        // Generate canvas for a batch of data
+        function generateBatchCanvas(startSample, endSample, batchNum) {
+            const EXPORT_MAX_WIDTH = 10000;
+            const ROW_HEIGHT = 250;
+            const HEADER_HEIGHT = 90;
+            const FOOTER_HEIGHT = 80;
+            const SECONDS_PER_ROW = 30;
+            
+            const totalSamples = endSample - startSample;
+            const samplesPerRow = Math.round(SECONDS_PER_ROW * SAMPLING_RATE);
+            const numRows = Math.ceil(totalSamples / samplesPerRow);
+            
+            const exportWidth = EXPORT_MAX_WIDTH;
+            const exportHeight = HEADER_HEIGHT + numRows * ROW_HEIGHT + FOOTER_HEIGHT;
+            
+            const exportCanvas = document.createElement('canvas');
+            exportCanvas.width = exportWidth;
+            exportCanvas.height = exportHeight;
+            const exportCtx = exportCanvas.getContext('2d');
+            
+            // White background
+            exportCtx.fillStyle = '#ffffff';
+            exportCtx.fillRect(0, 0, exportWidth, exportHeight);
+            
+            // Get data buffer
+            let buffer = [];
+            for (let i = startSample; i < endSample && i < ecgData.length; i++) {
+                buffer.push(ecgData[i]);
+            }
+            
+            // Find global min/max
+            const globalMinVal = Math.min(...buffer);
+            const globalMaxVal = Math.max(...buffer);
+            const globalRange = globalMaxVal - globalMinVal || 1;
+            
+            const modelName = document.getElementById('modelName').textContent;
+            const timestamp = new Date().toISOString();
+            
+            // Header
+            exportCtx.fillStyle = '#333333';
+            exportCtx.font = 'bold 18px Arial';
+            exportCtx.fillText(`ECG Recording - Batch ${batchNum}`, 20, 30);
+            
+            exportCtx.font = '12px Arial';
+            exportCtx.fillStyle = '#666666';
+            exportCtx.fillText('Model: ' + modelName, 20, 50);
+            exportCtx.fillText('Saved: ' + timestamp, 20, 68);
+            
+            const startTime = (startSample / SAMPLING_RATE).toFixed(2);
+            const endTime = (endSample / SAMPLING_RATE).toFixed(2);
+            exportCtx.fillText(`Time Range: ${startTime}s - ${endTime}s | ${numRows} row(s)`, 300, 50);
+            
+            // Draw each row
+            for (let rowIdx = 0; rowIdx < numRows; rowIdx++) {
+                const rowStartSample = rowIdx * samplesPerRow;
+                const rowEndSample = Math.min(rowStartSample + samplesPerRow, totalSamples);
+                
+                const rowBuffer = buffer.slice(rowStartSample, rowEndSample);
+                if (rowBuffer.length === 0) continue;
+                
+                const graphX = 100;
+                const graphY = HEADER_HEIGHT + rowIdx * ROW_HEIGHT + 30;
+                const graphWidth = exportWidth - 120;
+                const graphHeight = ROW_HEIGHT - 50;
+                
+                const rowStartTime = ((startSample + rowStartSample) / SAMPLING_RATE);
+                const rowEndTime = ((startSample + rowEndSample) / SAMPLING_RATE);
+                
+                // Time labels
+                exportCtx.fillStyle = '#1a5276';
+                exportCtx.font = 'bold 14px Arial';
+                exportCtx.fillText(formatTime(rowStartTime), 10, graphY + graphHeight / 2 + 5);
+                exportCtx.fillText(formatTime(rowEndTime), exportWidth - 85, graphY + graphHeight / 2 + 5);
+                
+                // Row number
+                exportCtx.fillStyle = '#7f8c8d';
+                exportCtx.font = '10px Arial';
+                exportCtx.fillText(`Row ${rowIdx + 1}`, 10, graphY - 5);
+                
+                // Graph border
+                exportCtx.strokeStyle = '#cccccc';
+                exportCtx.lineWidth = 1;
+                exportCtx.strokeRect(graphX, graphY, graphWidth, graphHeight);
+                
+                // Medical grid
+                exportCtx.strokeStyle = '#ffcccc';
+                exportCtx.lineWidth = 0.5;
+                for (let x = graphX; x <= graphX + graphWidth; x += 15) {
+                    exportCtx.beginPath();
+                    exportCtx.moveTo(x, graphY);
+                    exportCtx.lineTo(x, graphY + graphHeight);
+                    exportCtx.stroke();
+                }
+                for (let y = graphY; y <= graphY + graphHeight; y += 15) {
+                    exportCtx.beginPath();
+                    exportCtx.moveTo(graphX, y);
+                    exportCtx.lineTo(graphX + graphWidth, y);
+                    exportCtx.stroke();
+                }
+                
+                // Draw ECG signal
+                if (rowBuffer.length >= 2) {
+                    exportCtx.strokeStyle = '#00aa66';
+                    exportCtx.lineWidth = 1.5;
+                    exportCtx.beginPath();
+                    
+                    for (let i = 0; i < rowBuffer.length; i++) {
+                        const x = graphX + (i / samplesPerRow) * graphWidth;
+                        const y = graphY + graphHeight - ((rowBuffer[i] - globalMinVal) / globalRange) * (graphHeight - 20) - 10;
+                        
+                        if (i === 0) {
+                            exportCtx.moveTo(x, y);
+                        } else {
+                            exportCtx.lineTo(x, y);
+                        }
+                    }
+                    exportCtx.stroke();
+                    
+                    // Draw R-peak markers
+                    annotations.forEach(ann => {
+                        const globalIdx = ann.sample_index - startSample;
+                        if (globalIdx >= rowStartSample && globalIdx < rowEndSample) {
+                            const localIdx = globalIdx - rowStartSample;
+                            if (localIdx >= 0 && localIdx < rowBuffer.length) {
+                                const x = graphX + (localIdx / samplesPerRow) * graphWidth;
+                                const y = graphY + graphHeight - ((rowBuffer[localIdx] - globalMinVal) / globalRange) * (graphHeight - 20) - 10;
+                                
+                                const classResult = classifications.find(c => c.r_peak === ann.sample_index);
+                                if (classResult && classResult.correct === false) {
+                                    exportCtx.strokeStyle = '#cc8800';
+                                    exportCtx.lineWidth = 2;
+                                    exportCtx.beginPath();
+                                    exportCtx.arc(x, y, 6, 0, Math.PI * 2);
+                                    exportCtx.stroke();
+                                }
+                                
+                                exportCtx.fillStyle = ann.beat_type === 'N' ? '#00aa66' : '#cc3333';
+                                exportCtx.beginPath();
+                                exportCtx.arc(x, y, 3, 0, Math.PI * 2);
+                                exportCtx.fill();
+                            }
+                        }
+                    });
+                }
+            }
+            
+            // Legend
+            const legendY = exportHeight - 50;
+            exportCtx.font = '11px Arial';
+            exportCtx.fillStyle = '#00aa66';
+            exportCtx.beginPath();
+            exportCtx.arc(60, legendY, 5, 0, Math.PI * 2);
+            exportCtx.fill();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('Normal', 72, legendY + 4);
+            
+            exportCtx.fillStyle = '#cc3333';
+            exportCtx.beginPath();
+            exportCtx.arc(140, legendY, 5, 0, Math.PI * 2);
+            exportCtx.fill();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('Abnormal', 152, legendY + 4);
+            
+            exportCtx.strokeStyle = '#cc8800';
+            exportCtx.lineWidth = 2;
+            exportCtx.beginPath();
+            exportCtx.arc(240, legendY, 7, 0, Math.PI * 2);
+            exportCtx.stroke();
+            exportCtx.fillStyle = '#333333';
+            exportCtx.fillText('False', 255, legendY + 4);
+            
+            exportCtx.fillStyle = '#666666';
+            exportCtx.font = '10px Arial';
+            exportCtx.fillText(`Sampling: ${SAMPLING_RATE}Hz | ${SECONDS_PER_ROW}s/row`, 320, legendY + 4);
+            
+            return exportCanvas;
+        }
+        
+        // Update batch status display
+        function updateBatchStatus() {
+            const statusEl = document.getElementById('batchStatus');
+            if (!statusEl) return;
+            
+            const totalSaved = savedBatches.reduce((sum, b) => sum + (b.endSample - b.startSample), 0);
+            const savedSeconds = totalSaved / SAMPLING_RATE;
+            const unsavedSeconds = (currentIndex - lastBatchEndSample) / SAMPLING_RATE;
+            
+            statusEl.innerHTML = `
+                <span style="color: #00ff88;">📦 ${savedBatches.length} batch${savedBatches.length !== 1 ? 'es' : ''}</span>
+                <span style="color: #888; margin-left: 10px;">(${savedSeconds.toFixed(0)}s saved)</span>
+                ${unsavedSeconds > 10 ? `<span style="color: #ffd700; margin-left: 10px;">⏳ ${unsavedSeconds.toFixed(0)}s pending</span>` : ''}
+            `;
+        }
+        
+        // Download all saved batches
+        function downloadAllBatches() {
+            if (savedBatches.length === 0) {
+                alert('No batches saved yet. Recording auto-saves batches every 2 minutes.');
+                return;
+            }
+            
+            console.log(`[ECG] Downloading ${savedBatches.length} saved batches...`);
+            
+            // Download each batch with a small delay to prevent browser blocking
+            savedBatches.forEach((batch, idx) => {
+                setTimeout(() => {
+                    const link = document.createElement('a');
+                    link.download = `ecg_batch_${batch.batchNum}_${batch.timestamp.replace(/[:.]/g, '-')}.png`;
+                    link.href = batch.dataURL;
+                    link.click();
+                    console.log(`[ECG] Downloaded batch ${batch.batchNum}`);
+                }, idx * 500);  // 500ms delay between downloads
+            });
+        }
+        
+        // Export only unsaved data (faster than full export)
+        function exportUnsaved(format = 'png') {
+            const unsavedStart = lastBatchEndSample;
+            const unsavedEnd = currentIndex;
+            
+            if (unsavedEnd <= unsavedStart) {
+                alert('No unsaved data to export. All data has been saved in batches.');
+                return;
+            }
+            
+            console.log(`[ECG] Exporting unsaved data: ${unsavedStart} to ${unsavedEnd}`);
+            
+            const batchCanvas = generateBatchCanvas(unsavedStart, unsavedEnd, savedBatches.length + 1);
+            const dataURL = batchCanvas.toDataURL('image/' + format, 0.95);
+            const link = document.createElement('a');
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            link.download = `ecg_unsaved_${timestamp}.${format}`;
+            link.href = dataURL;
+            link.click();
+            
+            console.log('[ECG] Unsaved data exported');
+        }
+        
+        // Force save current pending data as a batch
+        function forceSaveBatch() {
+            const unsavedSamples = currentIndex - lastBatchEndSample;
+            if (unsavedSamples < SAMPLING_RATE * 5) {  // Need at least 5 seconds
+                alert('Need at least 5 seconds of unsaved data to create a batch.');
+                return;
+            }
+            saveBatch(lastBatchEndSample, currentIndex);
+        }
+        
         // Draw beat waveform on the beat snapshot canvas
         function drawBeatWaveform(waveform, isAbnormal = false) {
             const width = beatCanvas.getBoundingClientRect().width;
@@ -1666,6 +1971,8 @@ HTML_TEMPLATE = '''
         let lastFrameTime = 0;
         const targetFPS = 60;
         const frameInterval = 1000 / targetFPS;
+        let lastBatchCheckTime = 0;
+        const batchCheckInterval = 5000;  // Check for auto-batch every 5 seconds
         
         function animate(timestamp) {
             if (!isRunning) return;
@@ -1694,6 +2001,13 @@ HTML_TEMPLATE = '''
                 }
                 
                 checkForBeats();
+                
+                // Check for auto-batch save periodically (not every frame)
+                if (timestamp - lastBatchCheckTime > batchCheckInterval) {
+                    lastBatchCheckTime = timestamp;
+                    checkAutoBatch();
+                    updateBatchStatus();
+                }
             }
             
             if (currentIndex < ecgData.length) {
@@ -1701,6 +2015,10 @@ HTML_TEMPLATE = '''
             } else {
                 isRunning = false;
                 document.getElementById('currentStatus').textContent = 'Complete!';
+                // Final batch save on completion
+                if (currentIndex - lastBatchEndSample > SAMPLING_RATE * 5) {
+                    saveBatch(lastBatchEndSample, currentIndex);
+                }
             }
         }
         
@@ -1735,6 +2053,11 @@ HTML_TEMPLATE = '''
             isClassifying = false;
             classificationQueue = [];
             processedBeats.clear();
+            
+            // Reset batch state
+            savedBatches = [];
+            lastBatchEndSample = 0;
+            updateBatchStatus();
             
             document.getElementById('totalBeats').textContent = '0';
             document.getElementById('normalBeats').textContent = '0';
