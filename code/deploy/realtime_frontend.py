@@ -699,14 +699,12 @@ HTML_TEMPLATE = '''
                 <button id="fwdBtn" onclick="scrollHistory(1)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">▶ +1s</button>
                 <button id="fwd5Btn" onclick="scrollHistory(5)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">⏩ +5s</button>
                 <span style="margin: 0 10px; color: #444;">|</span>
-                <button onclick="downloadAllBatches()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;">📦 Download Batches</button>
-                <button onclick="exportUnsaved('png')" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,215,0,0.1); border: 1px solid rgba(255,215,0,0.3); color: #ffd700; cursor: pointer;">⏳ Export Unsaved</button>
-                <button onclick="forceSaveBatch()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">💾 Save Now</button>
+                <button onclick="downloadAllBatches()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;" title="Manual download (auto-downloads on Stop)">📦 Re-download Batches</button>
             </div>
             <div id="batchStatus" style="text-align: center; margin-top: 8px; font-size: 12px;">
-                <span style="color: #888;">📦 Auto-batch: saves every 2 minutes</span>
+                <span style="color: #888;">📦 Auto-batch: saves every 2 min, auto-downloads on Stop</span>
             </div>
-            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 5px;">💡 Drag the graph to scroll through history | Batches auto-save for faster export</p>
+            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 5px;">💡 Drag the graph to scroll through history | Press Stop to auto-save &amp; download all batches</p>
         </div>
         
         <!-- Beat Snapshot Panel - Shows the current beat segment sent to ONNX model -->
@@ -2041,6 +2039,62 @@ HTML_TEMPLATE = '''
             if (animationId) {
                 cancelAnimationFrame(animationId);
             }
+            
+            // AUTO-SAVE: Save any remaining unsaved data as final batch
+            const unsavedSamples = currentIndex - lastBatchEndSample;
+            if (unsavedSamples >= MIN_BATCH_SAMPLES) {
+                console.log('[ECG] Auto-saving final batch on stop...');
+                saveBatch(lastBatchEndSample, currentIndex);
+            }
+            
+            // AUTO-DOWNLOAD: Download all batches automatically when stopped
+            if (savedBatches.length > 0) {
+                console.log('[ECG] Auto-downloading all batches on stop...');
+                // Small delay to let the final batch save complete
+                setTimeout(() => {
+                    autoDownloadAllBatches();
+                }, 500);
+            }
+        }
+        
+        // Auto-download all batches (called automatically on stop)
+        function autoDownloadAllBatches() {
+            if (savedBatches.length === 0) return;
+            
+            const totalBatches = savedBatches.length;
+            const totalSeconds = savedBatches.reduce((sum, b) => sum + (b.endSample - b.startSample), 0) / SAMPLING_RATE;
+            
+            // Show notification
+            const statusEl = document.getElementById('batchStatus');
+            if (statusEl) {
+                statusEl.innerHTML = `
+                    <span style="color: #00ff88;">📥 Auto-downloading ${totalBatches} batch${totalBatches !== 1 ? 'es' : ''}...</span>
+                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
+                `;
+            }
+            
+            // Download each batch with a delay to prevent browser blocking
+            savedBatches.forEach((batch, idx) => {
+                setTimeout(() => {
+                    const link = document.createElement('a');
+                    link.download = `ecg_batch_${batch.batchNum}_${batch.timestamp.replace(/[:.]/g, '-')}.png`;
+                    link.href = batch.dataURL;
+                    link.click();
+                    console.log(`[ECG] Auto-downloaded batch ${batch.batchNum}/${totalBatches}`);
+                    
+                    // Update status after last download
+                    if (idx === savedBatches.length - 1) {
+                        setTimeout(() => {
+                            if (statusEl) {
+                                statusEl.innerHTML = `
+                                    <span style="color: #00ff88;">✅ ${totalBatches} batch${totalBatches !== 1 ? 'es' : ''} downloaded!</span>
+                                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
+                                `;
+                            }
+                        }, 500);
+                    }
+                }, idx * BATCH_DOWNLOAD_DELAY_MS);
+            });
         }
         
         function resetSimulation() {
