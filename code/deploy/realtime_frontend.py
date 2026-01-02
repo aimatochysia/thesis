@@ -51,7 +51,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from flask import Flask, render_template_string, jsonify, request
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, sosfilt, find_peaks
 
 # ONNX Runtime import for cross-platform inference (PyTorch models exported to ONNX)
 try:
@@ -118,7 +118,7 @@ R_PEAK_TOLERANCE = 36  # 100ms at 360Hz - detected R-peak must be within 100ms o
 
 
 # -------------------------------
-# Pan-Tompkins R-peak Detector
+# Real-time Pan-Tompkins R-peak Detector
 # -------------------------------
 
 def butter_bandpass_sos(lowcut, highcut, fs, order=2):
@@ -129,127 +129,176 @@ def butter_bandpass_sos(lowcut, highcut, fs, order=2):
 
 class PanTompkinsDetector:
     """
-    Simplified Pan–Tompkins-like detector suitable for real-time streaming.
-    - Applies derivative, squaring, and moving window integration (MWI).
-    - Uses adaptive thresholding with refractory period.
-    - Uses bounded deque buffers to prevent memory growth during long recordings.
+    Real-time Pan-Tompkins R-peak detector for streaming ECG.
     
-    This is used for real-world deployment where no annotation file exists.
-    The system must detect R-peaks on its own.
+    Based on the working implementation in deployment.py with:
+    - Derivative computation using 5-point kernel
+    - Squaring
+    - Moving window integration (MWI)
+    - Adaptive thresholding
+    - Refractory period
+    - Local peak refinement
+    
+    Uses bounded buffers to prevent memory growth during long recordings.
     """
-    # Buffer size: enough for MWI window + peak refinement + margin
-    BUFFER_SIZE = 500  # ~1.4 seconds at 360Hz, more than enough for all operations
+    # Buffer size: ~10 seconds at 360Hz for stable operation
+    BUFFER_SIZE = 3600
     
-    def __init__(self, fs: int, mwi_window_sec: float = 0.12,
-                 refractory_ms: int = 200, adaptive_alpha: float = 0.01,
-                 init_threshold: float = 0.0):
+    def __init__(self, fs: int = 360, mwi_window_sec: float = 0.12,
+                 refractory_ms: int = 200, adaptive_alpha: float = 0.01):
+        """
+        Initialize detector.
+        
+        Args:
+            fs: Sampling frequency (Hz)
+            mwi_window_sec: Moving window integration duration (seconds)
+            refractory_ms: Minimum time between peaks (milliseconds)
+            adaptive_alpha: Smoothing factor for threshold adaptation
+        """
         self.fs = fs
         self.deriv_kernel = np.array([-1, -2, 0, 2, 1], dtype=np.float32)
         self.mwi_window = int(max(1, round(mwi_window_sec * fs)))
         self.refractory_samples = int(round(refractory_ms * fs / 1000.0))
         self.alpha = adaptive_alpha
 
-        # Bounded buffers using deque to prevent memory growth
-        self.filtered_buffer = deque(maxlen=self.BUFFER_SIZE)
-        self.deriv_buffer = deque(maxlen=self.BUFFER_SIZE)
-        self.square_buffer = deque(maxlen=self.BUFFER_SIZE)
-        self.mwi_buffer = deque(maxlen=self.BUFFER_SIZE)
+        # Buffers - using lists with manual trimming for simplicity
+        self.filtered_buffer = []
+        self.deriv_buffer = []
+        self.square_buffer = []
+        self.mwi_buffer = []
         
-        # Track total samples processed for correct R-peak index
-        self.total_samples = 0
+        # Track global sample count for correct R-peak indexing
+        self.global_sample_count = 0
+        self.buffer_start_global = 0  # Global index of first sample in buffer
 
         # Adaptive threshold state
-        self.threshold = init_threshold
+        self.threshold = 0.0
         self.peak_mean = 0.0
         self.noise_mean = 0.0
-        self.last_peak_index = -10**9
+        self.last_peak_global = -10**9  # Last detected peak in global index
 
     def step(self, filtered_sample: float) -> Optional[int]:
         """
-        Process one sample; return R-peak index if detected, else None.
+        Process one filtered sample and return R-peak global index if detected.
+        
+        Args:
+            filtered_sample: Bandpass-filtered ECG sample
+            
+        Returns:
+            Global sample index of R-peak if detected, None otherwise
         """
-        # Update buffers
+        # Add to buffers
         self.filtered_buffer.append(filtered_sample)
-        self.total_samples += 1
-        buffer_idx = len(self.filtered_buffer) - 1  # Index within current buffer
+        self.global_sample_count += 1
+        
+        buffer_idx = len(self.filtered_buffer) - 1
+        global_idx = self.global_sample_count - 1
 
-        # Derivative via small FIR over filtered_buffer
+        # Compute derivative
         deriv = self._compute_derivative(buffer_idx)
         self.deriv_buffer.append(deriv)
 
+        # Square
         sq = deriv * deriv
         self.square_buffer.append(sq)
 
+        # Moving window integration
         mwi_val = self._moving_window_integral(buffer_idx)
         self.mwi_buffer.append(mwi_val)
 
-        # Initialize threshold after some samples
+        # Trim buffers if too large (keep last BUFFER_SIZE samples)
+        if len(self.filtered_buffer) > self.BUFFER_SIZE:
+            trim_count = len(self.filtered_buffer) - self.BUFFER_SIZE
+            self.filtered_buffer = self.filtered_buffer[trim_count:]
+            self.deriv_buffer = self.deriv_buffer[trim_count:]
+            self.square_buffer = self.square_buffer[trim_count:]
+            self.mwi_buffer = self.mwi_buffer[trim_count:]
+            self.buffer_start_global += trim_count
+
+        # Recalculate buffer_idx after potential trim
+        buffer_idx = len(self.filtered_buffer) - 1
+
+        # Initialize threshold during warmup period
         if len(self.mwi_buffer) < self.mwi_window * 4:
-            # Initialize with a small multiple of mean
-            mean_mwi = np.mean(self.mwi_buffer)
+            mean_mwi = np.mean(self.mwi_buffer) if self.mwi_buffer else 0
             self.threshold = mean_mwi * 1.5
+            # Also initialize peak_mean and noise_mean
+            if self.peak_mean == 0 and mean_mwi > 0:
+                self.peak_mean = mean_mwi * 2.0
+                self.noise_mean = mean_mwi * 0.5
             return None
 
-        # Adaptive thresholding
+        # Check for threshold crossing
         detected = False
-        global_idx = self.total_samples - 1  # Global sample index
-        
         if mwi_val > self.threshold:
-            # Check refractory period
-            if global_idx - self.last_peak_index > self.refractory_samples:
+            # Check refractory period using global indices
+            if global_idx - self.last_peak_global > self.refractory_samples:
                 detected = True
-                # Update peak_mean
+                # Update peak mean (signal level)
                 self.peak_mean = (1 - self.alpha) * self.peak_mean + self.alpha * mwi_val
-                self.last_peak_index = global_idx
         else:
-            # Update noise_mean
+            # Update noise mean
             self.noise_mean = (1 - self.alpha) * self.noise_mean + self.alpha * mwi_val
 
-        # Update threshold (halfway between noise and signal estimates)
+        # Update threshold: halfway between noise and peak estimates
         self.threshold = self.noise_mean + 0.5 * (self.peak_mean - self.noise_mean)
+        
+        # Ensure threshold doesn't go too low
+        if self.threshold < self.noise_mean * 1.2:
+            self.threshold = self.noise_mean * 1.5
 
         if detected:
-            # Local peak refinement on filtered signal in a small neighborhood
-            r_index = self._local_peak_refinement(buffer_idx, global_idx)
-            self.last_peak_index = r_index
-            return r_index
+            # Local peak refinement in filtered signal
+            r_global = self._local_peak_refinement(buffer_idx, global_idx)
+            self.last_peak_global = r_global
+            return r_global
 
         return None
 
     def _compute_derivative(self, buffer_idx: int) -> float:
+        """Compute derivative using 5-point kernel."""
         k = len(self.deriv_kernel)
         if buffer_idx < k - 1:
             return 0.0
-        segment = [self.filtered_buffer[buffer_idx - (k - 1) + i] for i in range(k)]
+        segment = self.filtered_buffer[buffer_idx - (k - 1): buffer_idx + 1]
         return float(np.dot(segment, self.deriv_kernel))
 
     def _moving_window_integral(self, buffer_idx: int) -> float:
+        """Compute moving window integration (mean of squared derivative)."""
         w = self.mwi_window
         start = max(0, buffer_idx - w + 1)
-        segment = [self.square_buffer[i] for i in range(start, buffer_idx + 1)]
+        segment = self.square_buffer[start: buffer_idx + 1]
         return float(np.mean(segment)) if segment else 0.0
 
-    def _local_peak_refinement(self, buffer_idx: int, global_idx: int, search_radius_samples: int = 10) -> int:
-        """Find local maximum in filtered signal near buffer_idx, return global index."""
-        start = max(0, buffer_idx - search_radius_samples)
-        end = min(len(self.filtered_buffer), buffer_idx + search_radius_samples + 1)
-        segment = [self.filtered_buffer[i] for i in range(start, end)]
+    def _local_peak_refinement(self, buffer_idx: int, global_idx: int, 
+                                search_radius: int = 15) -> int:
+        """Find local maximum in filtered signal near detected peak."""
+        start = max(0, buffer_idx - search_radius)
+        end = min(len(self.filtered_buffer), buffer_idx + search_radius + 1)
+        segment = self.filtered_buffer[start:end]
+        
+        if not segment:
+            return global_idx
+            
+        # Find maximum (R-peaks are typically positive peaks in filtered signal)
         local_max_offset = int(np.argmax(segment))
-        # Convert to global index: global_idx - buffer_idx gives offset to start of buffer
+        
+        # Convert back to global index
         offset_from_buffer_idx = (start + local_max_offset) - buffer_idx
         return global_idx + offset_from_buffer_idx
 
     def reset(self):
         """Reset detector state for new recording."""
-        self.filtered_buffer = deque(maxlen=self.BUFFER_SIZE)
-        self.deriv_buffer = deque(maxlen=self.BUFFER_SIZE)
-        self.square_buffer = deque(maxlen=self.BUFFER_SIZE)
-        self.mwi_buffer = deque(maxlen=self.BUFFER_SIZE)
-        self.total_samples = 0
+        self.filtered_buffer = []
+        self.deriv_buffer = []
+        self.square_buffer = []
+        self.mwi_buffer = []
+        self.global_sample_count = 0
+        self.buffer_start_global = 0
         self.threshold = 0.0
         self.peak_mean = 0.0
         self.noise_mean = 0.0
-        self.last_peak_index = -10**9
+        self.last_peak_global = -10**9
 
 
 # Global R-peak detector instance
@@ -339,18 +388,18 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
     ecg_data = df['MLII'].values.astype(np.float32)
     
     # Pre-filter signal for R-peak detection (bandpass 0.5-40 Hz)
-    print("Applying bandpass filter for R-peak detection...")
+    print("Applying bandpass filter for R-peak detection (0.5-40 Hz)...")
     sos = butter_bandpass_sos(0.5, 40.0, SAMPLING_RATE, order=2)
     filtered_signal = sosfilt(sos, ecg_data).astype(np.float32)
     
-    # Initialize Pan-Tompkins R-peak detector
+    # Initialize real-time Pan-Tompkins R-peak detector
     rpeak_detector = PanTompkinsDetector(
         fs=SAMPLING_RATE,
-        mwi_window_sec=0.12,
-        refractory_ms=200,
-        adaptive_alpha=0.01
+        mwi_window_sec=0.12,  # 120ms MWI window
+        refractory_ms=200,     # 200ms refractory period (max 300 BPM)
+        adaptive_alpha=0.01    # Threshold adaptation rate
     )
-    print("✓ Pan-Tompkins R-peak detector initialized")
+    print("✓ Real-time Pan-Tompkins R-peak detector initialized")
     
     # Load annotations (used only for ground truth comparison, NOT for R-peak positions)
     annotations_list = []
@@ -2202,7 +2251,7 @@ def reset_detector():
     """
     global rpeak_detector, beat_buffer
     
-    # Reset the Pan-Tompkins detector
+    # Reset the Pan-Tompkins detector with same parameters as load_data
     rpeak_detector = PanTompkinsDetector(
         fs=SAMPLING_RATE,
         mwi_window_sec=0.12,
