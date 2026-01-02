@@ -807,6 +807,11 @@ HTML_TEMPLATE = '''
         // Automatically saves batches during recording for faster export
         const AUTO_BATCH_INTERVAL_SECONDS = 120;  // Auto-save every 2 minutes
         const AUTO_BATCH_INTERVAL_SAMPLES = AUTO_BATCH_INTERVAL_SECONDS * SAMPLING_RATE;
+        const MIN_BATCH_SECONDS = 5;  // Minimum seconds for a batch
+        const MIN_BATCH_SAMPLES = MIN_BATCH_SECONDS * SAMPLING_RATE;
+        const BATCH_CHECK_INTERVAL_MS = 5000;  // Check for auto-batch every 5 seconds
+        const BATCH_DOWNLOAD_DELAY_MS = 500;  // Delay between batch downloads
+        const BATCH_GRID_SPACING = 30;  // Grid spacing in batch canvas
         let savedBatches = [];  // Array of {startSample, endSample, dataURL, timestamp}
         let lastBatchEndSample = 0;  // Track where last batch ended
         let autoBatchEnabled = true;  // Toggle for auto-batch feature
@@ -1520,7 +1525,7 @@ HTML_TEMPLATE = '''
                     link.href = batch.dataURL;
                     link.click();
                     console.log(`[ECG] Downloaded batch ${batch.batchNum}`);
-                }, idx * 500);  // 500ms delay between downloads
+                }, idx * BATCH_DOWNLOAD_DELAY_MS);
             });
         }
         
@@ -1550,8 +1555,8 @@ HTML_TEMPLATE = '''
         // Force save current pending data as a batch
         function forceSaveBatch() {
             const unsavedSamples = currentIndex - lastBatchEndSample;
-            if (unsavedSamples < SAMPLING_RATE * 5) {  // Need at least 5 seconds
-                alert('Need at least 5 seconds of unsaved data to create a batch.');
+            if (unsavedSamples < MIN_BATCH_SAMPLES) {
+                alert(`Need at least ${MIN_BATCH_SECONDS} seconds of unsaved data to create a batch.`);
                 return;
             }
             saveBatch(lastBatchEndSample, currentIndex);
@@ -1972,7 +1977,6 @@ HTML_TEMPLATE = '''
         const targetFPS = 60;
         const frameInterval = 1000 / targetFPS;
         let lastBatchCheckTime = 0;
-        const batchCheckInterval = 5000;  // Check for auto-batch every 5 seconds
         
         function animate(timestamp) {
             if (!isRunning) return;
@@ -2003,7 +2007,7 @@ HTML_TEMPLATE = '''
                 checkForBeats();
                 
                 // Check for auto-batch save periodically (not every frame)
-                if (timestamp - lastBatchCheckTime > batchCheckInterval) {
+                if (timestamp - lastBatchCheckTime > BATCH_CHECK_INTERVAL_MS) {
                     lastBatchCheckTime = timestamp;
                     checkAutoBatch();
                     updateBatchStatus();
@@ -2016,7 +2020,7 @@ HTML_TEMPLATE = '''
                 isRunning = false;
                 document.getElementById('currentStatus').textContent = 'Complete!';
                 // Final batch save on completion
-                if (currentIndex - lastBatchEndSample > SAMPLING_RATE * 5) {
+                if (currentIndex - lastBatchEndSample > MIN_BATCH_SAMPLES) {
                     saveBatch(lastBatchEndSample, currentIndex);
                 }
             }
