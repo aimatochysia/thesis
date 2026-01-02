@@ -159,6 +159,12 @@ class RealtimeRPeakDetector:
     for MIT-BIH MLII lead data at 360Hz.
     """
     
+    # Detection parameters as class constants for maintainability
+    THRESHOLD_SCALE_FACTOR = 0.5  # Scale factor for percentile threshold
+    THRESHOLD_DECAY = 0.9  # Weight for old threshold in adaptive update
+    THRESHOLD_UPDATE = 0.1  # Weight for new peak in adaptive update
+    PEAK_TO_THRESHOLD_RATIO = 0.5  # Ratio to convert peak to threshold
+    
     def __init__(self, fs: int = 360):
         """
         Initialize detector.
@@ -234,7 +240,7 @@ class RealtimeRPeakDetector:
         # Warmup: compute threshold from initial data
         if not self.initialized:
             if self.global_idx >= self.warmup_samples:
-                self.threshold = np.percentile(self.mwi_buffer, self.height_percentile) * 0.5
+                self.threshold = np.percentile(self.mwi_buffer, self.height_percentile) * self.THRESHOLD_SCALE_FACTOR
                 self.initialized = True
             return None
         
@@ -295,8 +301,9 @@ class RealtimeRPeakDetector:
         
         # Check if above threshold
         if peak_val > self.threshold:
-            # Update threshold adaptively
-            self.threshold = 0.9 * self.threshold + 0.1 * (peak_val * 0.5)
+            # Update threshold adaptively using class constants
+            self.threshold = (self.THRESHOLD_DECAY * self.threshold + 
+                              self.THRESHOLD_UPDATE * (peak_val * self.PEAK_TO_THRESHOLD_RATIO))
             
             # Refine to find actual R-peak in original signal
             refined_global = self._refine_peak_location(check_idx, peak_global)
