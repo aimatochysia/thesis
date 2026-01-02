@@ -4,18 +4,11 @@ ECG Real-Time Classification Frontend
 A mini web-based frontend that simulates real-time ECG monitoring and classification.
 Features:
 - Real-time ECG signal visualization with scrollable history
-- Pan-Tompkins R-peak detection (simulates real deployment - no annotation file needed)
+- Automatic heartbeat detection at R-peaks
 - AI model classification using PyTorch ONNX models (v2/v3/v5/v6)
 - Live classification results display
-- Ground truth comparison (when detected R-peak matches annotation within tolerance)
 - False detection log with clickable navigation
 - Beat waveform snapshot showing exact input to ONNX model
-
-R-PEAK DETECTION:
-- Uses Pan-Tompkins algorithm for real-time R-peak detection
-- Does NOT rely on annotation file for R-peak positions
-- Annotations are only used for ground truth comparison (if detected R-peak is within 100ms)
-- If no matching annotation is found, ground truth shows as "UNKNOWN"
 
 PREPROCESSING (matches training exactly):
 - v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak), single beat classification
@@ -44,14 +37,10 @@ Usage:
 import os
 import sys
 import argparse
-from typing import Optional
-from collections import deque
-import bisect
 import numpy as np
 import pandas as pd
 import joblib
 from flask import Flask, render_template_string, jsonify, request
-from scipy.signal import butter, sosfilt, find_peaks
 
 # ONNX Runtime import for cross-platform inference (PyTorch models exported to ONNX)
 try:
@@ -113,210 +102,6 @@ SAMPLING_RATE = 360  # Hz - MIT-BIH standard sampling rate
 # Beat type classification: 'N' is Normal, anything else is Abnormal
 NORMAL_BEAT_TYPE = 'N'
 
-# R-peak detection tolerance (samples) for matching detected R-peaks to annotations
-R_PEAK_TOLERANCE = 36  # 100ms at 360Hz - detected R-peak must be within 100ms of annotation
-
-
-# -------------------------------
-# Batch R-peak Detector with Look-Ahead
-# -------------------------------
-# 
-# Designed for real-time deployment with look-ahead:
-# 1. Batch processing for efficiency at all playback speeds
-# 2. Uses scipy.signal.find_peaks for reliable detection
-# 3. Detection runs ahead of display position
-# 4. Beats classified when complete window available
-#
-# Based on Pan & Tompkins principles with batch optimizations.
-
-def butter_bandpass_sos(lowcut, highcut, fs, order=2):
-    """Design a bandpass filter using second-order sections."""
-    sos = butter(order, [lowcut, highcut], btype='bandpass', fs=fs, output='sos')
-    return sos
-
-
-class BatchRPeakDetector:
-    """
-    Batch R-peak detector optimized for real-time ECG classification.
-    
-    Key features:
-    - Batch processing: handles chunks of samples efficiently
-    - Uses scipy.signal.find_peaks for reliable detection
-    - Short warmup (360 samples = 1 second) for faster start
-    - Optimized for MLII lead at 360 Hz
-    
-    Detection approach:
-    1. Bandpass filter 5-15 Hz (QRS isolation)
-    2. Squared derivative for peak enhancement
-    3. Moving window integration
-    4. scipy.signal.find_peaks with height and distance constraints
-    5. R-peak refinement in original signal
-    """
-    
-    # Detection parameters (OPTIMIZED for MIT-BIH 360Hz MLII)
-    MIN_DISTANCE_MS = 280  # 280ms minimum between beats (max ~214 BPM)
-    MWI_WINDOW_MS = 80  # 80ms moving window integration
-    HEIGHT_PERCENTILE = 60  # Lowered for better sensitivity
-    SEARCH_WINDOW_MS = 40  # 40ms search window for R-peak refinement
-    WARMUP_MS = 1000  # 1 second warmup
-    
-    def __init__(self, fs: int = 360):
-        """Initialize detector."""
-        self.fs = fs
-        
-        # Convert ms parameters to samples
-        self.min_distance = int(self.MIN_DISTANCE_MS * fs / 1000)
-        self.mwi_window = int(self.MWI_WINDOW_MS * fs / 1000)
-        self.search_window = int(self.SEARCH_WINDOW_MS * fs / 1000)
-        self.warmup_samples = int(self.WARMUP_MS * fs / 1000)
-        
-        # Filter design
-        self.sos = butter(2, [5, 15], btype='bandpass', fs=fs, output='sos')
-        
-        # Signal storage
-        self.signal_buffer = []  # Raw signal
-        self.processed_up_to = 0  # Last processed sample index
-        self.detected_peaks = set()  # All detected R-peak indices (set for O(1) lookup)
-        self.last_peak_idx = -self.min_distance * 2
-        
-        # Threshold (will be set during warmup)
-        self.threshold = None
-        self.initialized = False
-
-    def process_batch(self, start_idx: int, end_idx: int, signal: np.ndarray) -> list:
-        """
-        Process a batch of samples and detect R-peaks.
-        
-        This is the main detection method - efficient batch processing.
-        
-        Args:
-            start_idx: Starting sample index to process
-            end_idx: Ending sample index (exclusive)
-            signal: Full ECG signal array
-            
-        Returns:
-            List of newly detected R-peak indices
-        """
-        # Ensure we have enough signal
-        if end_idx > len(signal):
-            end_idx = len(signal)
-        
-        if end_idx <= start_idx:
-            return []
-        
-        # Need warmup period
-        if end_idx < self.warmup_samples:
-            return []
-        
-        # Get segment with overlap for edge handling
-        overlap = self.mwi_window + self.search_window + 10
-        seg_start = max(0, start_idx - overlap)
-        segment = signal[seg_start:end_idx].astype(np.float32)
-        
-        if len(segment) < self.mwi_window + 10:
-            return []
-        
-        # Apply bandpass filter
-        filtered = sosfilt(self.sos, segment)
-        
-        # Compute derivative (5-point)
-        deriv = np.zeros_like(filtered)
-        for i in range(4, len(filtered)):
-            deriv[i] = (filtered[i] - filtered[i-4]) + 2 * (filtered[i-1] - filtered[i-3])
-        deriv /= 8.0
-        
-        # Square and MWI
-        squared = deriv ** 2
-        mwi = np.convolve(squared, np.ones(self.mwi_window) / self.mwi_window, mode='same')
-        
-        # Initialize or update threshold
-        if not self.initialized:
-            self.threshold = np.percentile(mwi, self.HEIGHT_PERCENTILE) * 0.35
-            self.initialized = True
-        
-        # Find peaks using scipy
-        peaks, _ = find_peaks(
-            mwi,
-            height=self.threshold,
-            distance=self.min_distance
-        )
-        
-        # Convert to global indices and filter
-        new_peaks = []
-        for peak_local in peaks:
-            peak_global = seg_start + peak_local
-            
-            # Skip if before the range we're processing
-            if peak_global < start_idx:
-                continue
-            
-            # Skip if already detected
-            if peak_global in self.detected_peaks:
-                continue
-            
-            # Skip if too close to last peak
-            if peak_global - self.last_peak_idx < self.min_distance:
-                continue
-            
-            # Refine R-peak location in original signal
-            refined = self._refine_peak(peak_global, signal)
-            
-            # Check distance again after refinement
-            if refined - self.last_peak_idx < self.min_distance:
-                continue
-            
-            # Check if already detected (after refinement)
-            if refined in self.detected_peaks:
-                continue
-            
-            # Accept this peak
-            self.detected_peaks.add(refined)
-            self.last_peak_idx = refined
-            new_peaks.append(refined)
-            
-            # Update threshold
-            if peak_local < len(mwi):
-                self.threshold = 0.85 * self.threshold + 0.15 * mwi[peak_local] * 0.35
-        
-        return new_peaks
-
-    def _refine_peak(self, global_idx: int, signal: np.ndarray) -> int:
-        """Refine R-peak location by finding maximum in original signal."""
-        search_start = max(0, global_idx - self.search_window)
-        search_end = min(len(signal), global_idx + self.search_window + 1)
-        
-        if search_end <= search_start:
-            return global_idx
-        
-        segment = signal[search_start:search_end]
-        
-        # R-peaks in MLII are typically positive
-        local_max_idx = int(np.argmax(segment))
-        return search_start + local_max_idx
-
-    def get_all_peaks(self) -> list:
-        """Get all detected peaks as sorted list."""
-        return sorted(self.detected_peaks)
-
-    def reset(self):
-        """Reset detector state."""
-        self.__init__(self.fs)
-
-
-# Main detector class - alias for backward compatibility
-# Main detector class - alias for backward compatibility
-RealtimeRPeakDetector = BatchRPeakDetector
-HamiltonTompkinsDetector = BatchRPeakDetector
-PanTompkinsDetector = BatchRPeakDetector
-
-# Global R-peak detector instance
-rpeak_detector = None
-filtered_signal = None  # Raw ECG signal (detector handles filtering internally)
-
-# Pre-sorted annotation indices for efficient binary search
-annotation_indices = None  # Sorted list of annotation sample indices
-
-
 # Global state
 app = Flask(__name__)
 ecg_data = None
@@ -348,17 +133,11 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
     - v6: 200 samples per beat (90 before + 110 after R-peak), 7-beat context window
     - Normalization: Uses the same scaler trained on training data ONLY
     
-    R-Peak Detection:
-    - Uses Pan-Tompkins algorithm to detect R-peaks in real-time
-    - Does NOT rely on annotation file for R-peak positions
-    - Annotations are only used for ground truth comparison (if matched within tolerance)
-    
     NOTE: All models now use MIT-BIH record 119 by default for consistent testing.
     Record 119 was excluded from v6 training, and using it for all models provides
     a fair comparison on unseen real ECG data.
     """
     global ecg_data, annotations, model, scaler, model_config, beat_buffer
-    global rpeak_detector, filtered_signal
     
     # Reset beat buffer for v6 context-aware model
     beat_buffer = []
@@ -395,18 +174,7 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
     df.columns = df.columns.str.strip().str.strip("'")
     ecg_data = df['MLII'].values.astype(np.float32)
     
-    # Raw signal - BatchRPeakDetector handles filtering internally
-    filtered_signal = ecg_data
-    
-    # Initialize batch R-peak detector (optimized for 1x speed with look-ahead)
-    rpeak_detector = BatchRPeakDetector(fs=SAMPLING_RATE)
-    print("✓ Batch R-peak detector initialized")
-    print("   - Optimized for real-time with look-ahead detection")
-    print("   - 280ms refractory period (max ~214 BPM)")
-    print("   - 1 second warmup for threshold calibration")
-    print("   - Internal bandpass filter 5-15 Hz")
-    
-    # Load annotations (used only for ground truth comparison, NOT for R-peak positions)
+    # Load annotations
     annotations_list = []
     with open(annotation_path, 'r') as f:
         lines = f.readlines()
@@ -425,11 +193,6 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
             except (ValueError, IndexError):
                 continue
     annotations = pd.DataFrame(annotations_list)
-    
-    # Create sorted annotation index for efficient binary search
-    annotation_indices = sorted(annotations['sample_index'].tolist())
-    
-    print(f"  NOTE: Annotations used for ground truth validation only, NOT for R-peak detection")
     
     # Get model configuration
     if model_version not in MODEL_CONFIGS:
@@ -457,54 +220,7 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
         raise FileNotFoundError(f"Scaler not found: {scaler_path}")
     
     print(f"\nLoaded {len(ecg_data)} ECG samples")
-    print(f"Loaded {len(annotations)} annotations (for ground truth only)")
-
-
-def find_matching_annotation(detected_r_peak: int, tolerance: int = R_PEAK_TOLERANCE):
-    """
-    Find an annotation that matches a detected R-peak within tolerance.
-    Uses binary search for O(log n) efficiency.
-    
-    This is used for ground truth comparison only. The detected R-peak is from
-    the Pan-Tompkins algorithm, and we try to find a matching annotation to
-    determine the ground truth label.
-    
-    Args:
-        detected_r_peak: Sample index of detected R-peak
-        tolerance: Maximum distance (samples) between detected and annotated R-peak
-        
-    Returns:
-        dict with 'beat_type' and 'sample_index' if found, None otherwise
-    """
-    if annotations is None or len(annotations) == 0:
-        return None
-    
-    # Use binary search to find candidate annotations within tolerance range
-    ann_indices = annotations['sample_index'].values
-    
-    # Find insertion point for the detected R-peak
-    idx = bisect.bisect_left(ann_indices, detected_r_peak)
-    
-    # Check nearby annotations (before and after insertion point)
-    best_match = None
-    best_distance = tolerance + 1
-    
-    for check_idx in [idx - 1, idx, idx + 1]:
-        if 0 <= check_idx < len(ann_indices):
-            distance = abs(ann_indices[check_idx] - detected_r_peak)
-            if distance <= tolerance and distance < best_distance:
-                best_distance = distance
-                best_match = check_idx
-    
-    if best_match is not None:
-        ann = annotations.iloc[best_match]
-        return {
-            'beat_type': ann['beat_type'],
-            'sample_index': int(ann['sample_index']),
-            'distance': int(best_distance)
-        }
-    
-    return None
+    print(f"Loaded {len(annotations)} annotations")
 
 
 def extract_beat_v6(signal, r_peak_idx):
@@ -645,16 +361,11 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     predicted_class = 1 if prob_abnormal >= 0.5 else 0
     predicted_label = "ABNORMAL" if predicted_class == 1 else "NORMAL"
     
-    # Get ground truth: 'N' is Normal, '?' means no matching annotation (unknown), anything else is Abnormal
-    if center_beat_type == '?':
-        ground_truth = "UNKNOWN"
-        correct = None  # Cannot determine correctness without ground truth
-    elif center_beat_type == NORMAL_BEAT_TYPE:
+    # Get ground truth: 'N' is Normal, anything else is Abnormal
+    if center_beat_type == NORMAL_BEAT_TYPE:
         ground_truth = "NORMAL"
-        correct = ground_truth == predicted_label
     else:
         ground_truth = "ABNORMAL"
-        correct = ground_truth == predicted_label
     
     # Include R-peak position in beat waveform for accurate marker placement
     if is_context_aware:
@@ -668,7 +379,7 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
         'ground_truth': ground_truth,
         'predicted': predicted_label,
         'probability': round(prob_abnormal, 4),
-        'correct': correct,
+        'correct': ground_truth == predicted_label,
         'beat_waveform': raw_beat.tolist(),  # Include raw beat for visualization
         'r_peak_pos_in_beat': r_peak_pos_in_beat,  # Position of R-peak in beat waveform
         'beat_length': BEAT_LENGTH_V6 if is_context_aware else BEAT_LENGTH
@@ -1053,24 +764,18 @@ HTML_TEMPLATE = '''
         const beatCtx = beatCanvas.getContext('2d');
         
         let ecgData = [];
-        let filteredSignal = [];  // Filtered signal for R-peak detection
-        let annotations = [];  // Used for ground truth comparison only
-        let rPeakTolerance = 36;  // Tolerance for matching detected R-peaks to annotations
+        let annotations = [];
         let currentIndex = 0;
         let isRunning = false;
         let animationId = null;
         let displayBuffer = [];
         let classifications = [];
         let falseDetections = [];
-        let detectedRPeaks = [];  // R-peaks detected by Pan-Tompkins (not from annotations)
         let beatTimes = [];  // Store recent beat times for BPM calculation
         let speedMultiplier = 1;  // 1x = real-time
         let currentBeatWaveform = null;
         let currentRPeakPos = 70;  // R-peak position in beat waveform
         let currentBeatLength = 188;  // Beat length
-        
-        // Pan-Tompkins detector state (client-side for visualization)
-        let lastDetectorIndex = 0;  // Track where we left off in detection
         
         // Graph height tracking - expand but never shrink for better readability
         let maxGraphHeight = 300;  // Track maximum height achieved
@@ -1613,12 +1318,8 @@ HTML_TEMPLATE = '''
             const response = await fetch('/api/data');
             const data = await response.json();
             ecgData = data.signal;
-            filteredSignal = data.filtered_signal;
-            annotations = data.annotations;  // For ground truth comparison only
-            rPeakTolerance = data.r_peak_tolerance || 36;
-            console.log(`Loaded ${ecgData.length} ECG samples`);
-            console.log(`Loaded ${annotations.length} annotations (for ground truth comparison only)`);
-            console.log('R-peak detection: Using Pan-Tompkins algorithm');
+            annotations = data.annotations;
+            console.log(`Loaded ${ecgData.length} ECG samples and ${annotations.length} annotations`);
         }
         
         // Draw ECG signal
@@ -1699,20 +1400,18 @@ HTML_TEMPLATE = '''
             }
             ctx.stroke();
             
-            // Draw DETECTED R-peak markers (from Pan-Tompkins algorithm)
-            // These are the actual R-peaks the system detected, not from annotations
-            detectedRPeaks.forEach(rPeak => {
-                if (rPeak > startSample && rPeak <= endSample) {
-                    const bufferIdx = rPeak - startSample;
+            // Draw R-peak markers
+            annotations.forEach(ann => {
+                if (ann.sample_index > startSample && ann.sample_index <= endSample) {
+                    const bufferIdx = ann.sample_index - startSample;
                     if (bufferIdx >= 0 && bufferIdx < buffer.length) {
                         const x = (bufferIdx / DISPLAY_SAMPLES) * width;
                         const y = height - ((buffer[bufferIdx] - minVal) / range) * (height - 40) - 20;
                         
-                        // Check classification result for this detected R-peak
-                        const classResult = classifications.find(c => c.r_peak === rPeak);
-                        
-                        // Draw false detection indicator (yellow ring)
+                        // Check if this beat has a false detection
+                        const classResult = classifications.find(c => c.r_peak === ann.sample_index);
                         if (classResult && classResult.correct === false) {
+                            // Yellow circle for false detection
                             ctx.strokeStyle = '#ffd700';
                             ctx.lineWidth = 3;
                             ctx.beginPath();
@@ -1720,20 +1419,8 @@ HTML_TEMPLATE = '''
                             ctx.stroke();
                         }
                         
-                        // Draw R-peak marker based on prediction
-                        // If no matching annotation, show as cyan (unknown ground truth)
-                        if (classResult) {
-                            if (classResult.beat_type === '?') {
-                                // No matching annotation - cyan marker
-                                ctx.fillStyle = '#00ccff';
-                            } else if (classResult.predicted === 'NORMAL') {
-                                ctx.fillStyle = '#00ff88';
-                            } else {
-                                ctx.fillStyle = '#ff4757';
-                            }
-                        } else {
-                            ctx.fillStyle = '#00ccff';  // Detected but not yet classified
-                        }
+                        // Draw marker
+                        ctx.fillStyle = ann.beat_type === 'N' ? '#00ff88' : '#ff4757';
                         ctx.beginPath();
                         ctx.arc(x, y, 6, 0, Math.PI * 2);
                         ctx.fill();
@@ -1788,101 +1475,54 @@ HTML_TEMPLATE = '''
             return Math.round(60 / avgInterval);
         }
         
-        // Look-ahead R-peak detection and classification
-        // Detection runs AHEAD of display, classification when beat is complete
-        const POST_R_SAMPLES = 110;  // v6: 110 samples after R-peak needed for beat extraction
-        const LOOK_AHEAD_SAMPLES = Math.round(SAMPLING_RATE * 0.5);  // 0.5 second look-ahead
-        
-        // Queue for pending classifications (detected but not yet complete)
-        let pendingBeats = [];  // [{r_peak, matched_ann}, ...]
-        
+        // Check for beats and classify - with throttling for high-speed mode
         async function checkForBeats() {
-            // Skip if already processing
+            // Skip if already processing classifications
             if (isClassifying) return;
             
-            // Look-ahead detection: run detector ahead of current display position
-            const detectEnd = Math.min(currentIndex + LOOK_AHEAD_SAMPLES, ecgData.length);
+            // Calculate samples to check based on speed
+            const samplesToCheck = Math.max(1, Math.round(speedMultiplier * (SAMPLING_RATE / 60)));
+            const prevSample = currentIndex - samplesToCheck;
             
-            if (lastDetectorIndex >= detectEnd) return;
+            // Collect beats to classify (avoid duplicates)
+            const beatsToClassify = [];
+            for (const ann of annotations) {
+                if (ann.sample_index > prevSample && ann.sample_index <= currentIndex && 
+                    ann.beat_type !== '+' && !processedBeats.has(ann.sample_index)) {
+                    beatsToClassify.push(ann);
+                }
+            }
+            
+            if (beatsToClassify.length === 0) return;
             
             isClassifying = true;
             
             try {
-                // Call server to detect R-peaks in the range
-                const detectResponse = await fetch('/api/detect_rpeak', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        start_idx: lastDetectorIndex,
-                        end_idx: detectEnd
-                    })
-                });
-                const detectResult = await detectResponse.json();
-                lastDetectorIndex = detectEnd;
-                
-                // Add newly detected R-peaks to pending queue
-                for (const rPeak of detectResult.detected_peaks) {
-                    if (processedBeats.has(rPeak)) continue;
+                for (const ann of beatsToClassify) {
+                    // Mark as processed immediately to prevent duplicates
+                    processedBeats.add(ann.sample_index);
                     
-                    const matchKey = String(rPeak);
-                    const matchedAnn = detectResult.matched_annotations[matchKey];
-                    
-                    pendingBeats.push({
-                        r_peak: rPeak,
-                        matched_ann: matchedAnn
-                    });
-                    
-                    // Store for visualization (will appear when R-peak scrolls into view)
-                    detectedRPeaks.push(rPeak);
-                }
-                
-                // Process pending beats that now have complete windows
-                // A beat is complete when currentIndex >= r_peak + POST_R_SAMPLES
-                const readyBeats = [];
-                const stillPending = [];
-                
-                for (const beat of pendingBeats) {
-                    if (currentIndex >= beat.r_peak + POST_R_SAMPLES) {
-                        readyBeats.push(beat);
-                    } else {
-                        stillPending.push(beat);
-                    }
-                }
-                pendingBeats = stillPending;
-                
-                // Classify ready beats
-                for (const beat of readyBeats) {
-                    if (processedBeats.has(beat.r_peak)) continue;
-                    processedBeats.add(beat.r_peak);
-                    
-                    // Limit processed beats set size
+                    // Limit processed beats set size to prevent memory issues
                     if (processedBeats.size > 5000) {
                         const toRemove = [...processedBeats].slice(0, 1000);
                         toRemove.forEach(v => processedBeats.delete(v));
                     }
-                    
-                    const beatType = beat.matched_ann ? beat.matched_ann.beat_type : null;
                     
                     try {
                         const response = await fetch('/api/classify', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({
-                                r_peak: beat.r_peak,
-                                beat_type: beatType
+                                r_peak: ann.sample_index,
+                                beat_type: ann.beat_type
                             })
                         });
                         const result = await response.json();
-                        
-                        if (beatType) {
-                            console.log('[ECG] Classified R-peak at', beat.r_peak, '(matched ann:', beat.matched_ann.sample_index, ') →', result.predicted);
-                        } else {
-                            console.log('[ECG] Classified R-peak at', beat.r_peak, '(no matching annotation) →', result.predicted);
-                        }
-                        
+                        console.log('[ECG] Beat at', ann.sample_index, ':', result.predicted);
                         addClassification(result);
                         
-                        const bpm = calculateBPM(beat.r_peak);
+                        // Calculate heart rate
+                        const bpm = calculateBPM(ann.sample_index);
                         if (bpm !== null && bpm > 0 && bpm < 300) {
                             document.getElementById('heartRate').textContent = bpm;
                         }
@@ -1890,8 +1530,6 @@ HTML_TEMPLATE = '''
                         console.error('Classification error:', e);
                     }
                 }
-            } catch (e) {
-                console.error('R-peak detection error:', e);
             } finally {
                 isClassifying = false;
             }
@@ -1956,22 +1594,12 @@ HTML_TEMPLATE = '''
                 
                 // Update beat info displays
                 const beatTypeEl = document.getElementById('beatTypeDisplay');
-                if (result.beat_type === '?') {
-                    beatTypeEl.textContent = '? (no match)';
-                    beatTypeEl.style.color = '#00ccff';  // Cyan for unknown
-                } else {
-                    beatTypeEl.textContent = result.beat_type;
-                    beatTypeEl.style.color = result.beat_type === 'N' ? '#00ff88' : '#ff4757';
-                }
+                beatTypeEl.textContent = result.beat_type;
+                beatTypeEl.style.color = result.beat_type === 'N' ? '#00ff88' : '#ff4757';
                 
                 const groundTruthEl = document.getElementById('groundTruthDisplay');
-                if (result.ground_truth === 'UNKNOWN') {
-                    groundTruthEl.textContent = 'UNKNOWN';
-                    groundTruthEl.style.color = '#00ccff';  // Cyan for unknown
-                } else {
-                    groundTruthEl.textContent = result.ground_truth;
-                    groundTruthEl.style.color = result.ground_truth === 'NORMAL' ? '#00ff88' : '#ff4757';
-                }
+                groundTruthEl.textContent = result.ground_truth;
+                groundTruthEl.style.color = result.ground_truth === 'NORMAL' ? '#00ff88' : '#ff4757';
                 
                 const predictionEl = document.getElementById('predictionDisplay');
                 predictionEl.textContent = result.predicted;
@@ -2093,12 +1721,11 @@ HTML_TEMPLATE = '''
             }
         }
         
-        async function resetSimulation() {
+        function resetSimulation() {
             stopSimulation();
             currentIndex = 0;
             classifications = [];
             falseDetections = [];
-            detectedRPeaks = [];  // Reset detected R-peaks
             beatTimes = [];
             currentBeatWaveform = null;
             viewOffset = 0;
@@ -2107,17 +1734,7 @@ HTML_TEMPLATE = '''
             // Reset high-speed stability tracking
             isClassifying = false;
             classificationQueue = [];
-            pendingBeats = [];  // Reset pending beats queue
             processedBeats.clear();
-            lastDetectorIndex = 0;  // Reset detector position
-            
-            // Reset server-side detector
-            try {
-                await fetch('/api/reset_detector', { method: 'POST' });
-                console.log('[ECG] Batch R-peak detector reset');
-            } catch (e) {
-                console.error('Failed to reset detector:', e);
-            }
             
             document.getElementById('totalBeats').textContent = '0';
             document.getElementById('normalBeats').textContent = '0';
@@ -2184,78 +1801,19 @@ def index():
 
 @app.route('/api/data')
 def get_data():
-    """Return ECG signal and filtered signal for R-peak detection as JSON.
-    
-    NOTE: Annotations are included for ground truth comparison only.
-    The frontend should use its own R-peak detection, NOT rely on annotation positions.
-    """
+    """Return ECG signal and annotations as JSON."""
     return jsonify({
         'signal': ecg_data.tolist(),
-        'filtered_signal': filtered_signal.tolist(),
-        'annotations': annotations.to_dict('records'),
-        'r_peak_tolerance': R_PEAK_TOLERANCE
-    })
-
-
-@app.route('/api/detect_rpeak', methods=['POST'])
-def detect_rpeak():
-    """
-    Detect R-peaks for a range of samples using batch processing.
-    
-    This endpoint processes ECG samples in batches for efficiency.
-    Uses scipy.signal.find_peaks for reliable detection.
-    
-    Request JSON:
-        start_idx: Starting sample index
-        end_idx: Ending sample index (exclusive)
-    
-    Returns:
-        detected_peaks: List of detected R-peak indices
-        matched_annotations: Dict mapping detected peaks to matching annotations (if any)
-    """
-    global rpeak_detector
-    
-    data = request.json
-    start_idx = data.get('start_idx', 0)
-    end_idx = data.get('end_idx', len(ecg_data))
-    
-    # Use batch processing for efficiency
-    detected_peaks = rpeak_detector.process_batch(start_idx, end_idx, ecg_data)
-    
-    # Find matching annotations for each detected peak
-    matched_annotations = {}
-    for r_peak in detected_peaks:
-        match = find_matching_annotation(r_peak)
-        if match:
-            matched_annotations[str(r_peak)] = match
-    
-    return jsonify({
-        'detected_peaks': detected_peaks,
-        'matched_annotations': matched_annotations
+        'annotations': annotations.to_dict('records')
     })
 
 
 @app.route('/api/classify', methods=['POST'])
 def classify():
-    """Classify a single beat at a detected R-peak position.
-    
-    The R-peak should be from the Pan-Tompkins detector, NOT from annotations.
-    The beat_type is optional - if provided, it's used for ground truth comparison.
-    If not provided, we try to find a matching annotation for ground truth.
-    """
+    """Classify a single beat."""
     data = request.json
     r_peak = data['r_peak']
-    
-    # Get beat type from request or try to find matching annotation
-    if 'beat_type' in data and data['beat_type']:
-        beat_type = data['beat_type']
-    else:
-        # Try to find matching annotation for ground truth
-        match = find_matching_annotation(r_peak)
-        if match:
-            beat_type = match['beat_type']
-        else:
-            beat_type = '?'  # Unknown - no matching annotation found
+    beat_type = data['beat_type']
     
     result = extract_and_classify_beat(ecg_data, r_peak, beat_type)
     return jsonify(result)
@@ -2268,26 +1826,7 @@ def get_model_info():
         'name': model_config['name'],
         'onnx_file': model_config['onnx_file'],
         'scaler_file': model_config['scaler_file'],
-        'r_peak_detection': 'Batch detector with look-ahead',
-        'r_peak_tolerance': R_PEAK_TOLERANCE,
     })
-
-
-@app.route('/api/reset_detector', methods=['POST'])
-def reset_detector():
-    """Reset the R-peak detector and beat buffer.
-    
-    Called when the simulation is reset to start fresh.
-    """
-    global rpeak_detector, beat_buffer
-    
-    # Reset the batch detector
-    rpeak_detector = BatchRPeakDetector(fs=SAMPLING_RATE)
-    
-    # Reset the beat buffer for v6 context-aware model
-    beat_buffer = []
-    
-    return jsonify({'status': 'ok', 'message': 'Detector reset successfully'})
 
 
 def main():
@@ -2304,7 +1843,7 @@ def main():
     
     print("=" * 60)
     print("ECG Real-Time Classification Frontend")
-    print("Using PyTorch ONNX Models + Look-Ahead R-Peak Detection")
+    print("Using PyTorch ONNX Models")
     print("=" * 60)
     
     print(f"\nSelected model: {args.model.upper()}")
@@ -2316,20 +1855,14 @@ def main():
     else:
         print(f"  Single-beat classification: 188 samples (70 before + 118 after R-peak)")
     
-    print("\nR-Peak Detection: Batch Detector with Look-Ahead")
-    print(f"  Tolerance for ground truth matching: {R_PEAK_TOLERANCE} samples (~{R_PEAK_TOLERANCE/SAMPLING_RATE*1000:.0f}ms)")
-    print("  NOTE: R-peaks detected by algorithm, NOT from annotation file")
-    print("  Annotations used only for ground truth validation when matched")
-    print("  Look-ahead: Detection runs 0.5s ahead of display for timely classification")
-    
     # All models now use record 119 by default
     # --training-data flag allows falling back to demo data (deprecated)
     use_record_119 = not args.training_data
     use_training_data = args.training_data
     
-    print("\nData: Using MIT-BIH record 119 (excluded from training - true validation)")
+    print("  Data: Using MIT-BIH record 119 (excluded from training - true validation)")
     
-    print("\nLoading data and model...")
+    print("Loading data and model...")
     load_data(model_version=args.model, use_training_data=use_training_data, use_record_119=use_record_119)
     
     print(f"\nStarting web server on port {args.port}...")
