@@ -51,7 +51,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from flask import Flask, render_template_string, jsonify, request
-from scipy.signal import butter, sosfilt, sosfilt_zi, find_peaks
+from scipy.signal import butter, sosfilt, find_peaks
 
 # ONNX Runtime import for cross-platform inference (PyTorch models exported to ONNX)
 try:
@@ -304,13 +304,14 @@ class BatchRPeakDetector:
 
 
 # Main detector class - alias for backward compatibility
+# Main detector class - alias for backward compatibility
 RealtimeRPeakDetector = BatchRPeakDetector
 HamiltonTompkinsDetector = BatchRPeakDetector
 PanTompkinsDetector = BatchRPeakDetector
 
 # Global R-peak detector instance
 rpeak_detector = None
-filtered_signal = None  # Pre-filtered signal for R-peak detection
+filtered_signal = None  # Raw ECG signal (detector handles filtering internally)
 
 # Pre-sorted annotation indices for efficient binary search
 annotation_indices = None  # Sorted list of annotation sample indices
