@@ -118,19 +118,16 @@ R_PEAK_TOLERANCE = 36  # 100ms at 360Hz - detected R-peak must be within 100ms o
 
 
 # -------------------------------
-# Real-time Hamilton-Tompkins R-peak Detector
+# Batch R-peak Detector with Look-Ahead
 # -------------------------------
 # 
-# Based on:
-# - Hamilton & Tompkins (1986): "Quantitative Investigation of QRS Detection Rules"
-# - Christov (2004): "Real time electrocardiogram QRS detection using combined adaptive threshold"
-# - BioSPPy/NeuroKit2 implementations
+# Designed for real-time deployment with look-ahead:
+# 1. Batch processing for efficiency at all playback speeds
+# 2. Uses scipy.signal.find_peaks for reliable detection
+# 3. Detection runs ahead of display position
+# 4. Beats classified when complete window available
 #
-# Key improvements over basic Pan-Tompkins:
-# 1. Peak detection instead of threshold crossing
-# 2. Search-back mechanism for missed beats
-# 3. RR interval-based adaptive thresholding
-# 4. Better initialization using signal statistics
+# Based on Pan & Tompkins principles with batch optimizations.
 
 def butter_bandpass_sos(lowcut, highcut, fs, order=2):
     """Design a bandpass filter using second-order sections."""
@@ -138,206 +135,178 @@ def butter_bandpass_sos(lowcut, highcut, fs, order=2):
     return sos
 
 
-class RealtimeRPeakDetector:
+class BatchRPeakDetector:
     """
-    Real-time R-peak detector for streaming ECG (MLII lead).
-    
-    VALIDATED on MIT-BIH record 119:
-    - Sensitivity: 99.90% (1985/1987 true peaks detected)
-    - Positive Predictivity: 100.00% (0 false positives)
-    - F1 Score: 99.95%
+    Batch R-peak detector optimized for real-time ECG classification.
     
     Key features:
-    - Bandpass filtering (5-15 Hz for QRS isolation) with streaming state
-    - Differentiation and squaring for QRS enhancement
-    - Moving window integration (80ms window)
-    - Local maximum detection with adaptive threshold
-    - R-peak refinement in original signal
-    - Optimized parameters: 350ms refractory, 80th percentile threshold
+    - Batch processing: handles chunks of samples efficiently
+    - Uses scipy.signal.find_peaks for reliable detection
+    - Short warmup (360 samples = 1 second) for faster start
+    - Optimized for MLII lead at 360 Hz
     
-    Based on Pan & Tompkins (1985) principles with optimized parameters
-    for MIT-BIH MLII lead data at 360Hz.
+    Detection approach:
+    1. Bandpass filter 5-15 Hz (QRS isolation)
+    2. Squared derivative for peak enhancement
+    3. Moving window integration
+    4. scipy.signal.find_peaks with height and distance constraints
+    5. R-peak refinement in original signal
     """
     
-    # Detection parameters as class constants for maintainability
-    THRESHOLD_SCALE_FACTOR = 0.5  # Scale factor for percentile threshold
-    THRESHOLD_DECAY = 0.9  # Weight for old threshold in adaptive update
-    THRESHOLD_UPDATE = 0.1  # Weight for new peak in adaptive update
-    PEAK_TO_THRESHOLD_RATIO = 0.5  # Ratio to convert peak to threshold
+    # Detection parameters (OPTIMIZED for MIT-BIH 360Hz MLII)
+    MIN_DISTANCE_MS = 280  # 280ms minimum between beats (max ~214 BPM)
+    MWI_WINDOW_MS = 80  # 80ms moving window integration
+    HEIGHT_PERCENTILE = 60  # Lowered for better sensitivity
+    SEARCH_WINDOW_MS = 40  # 40ms search window for R-peak refinement
+    WARMUP_MS = 1000  # 1 second warmup
     
     def __init__(self, fs: int = 360):
-        """
-        Initialize detector.
-        
-        Args:
-            fs: Sampling frequency (Hz), default 360 for MIT-BIH
-        """
+        """Initialize detector."""
         self.fs = fs
         
-        # Filter design with initial state for streaming
+        # Convert ms parameters to samples
+        self.min_distance = int(self.MIN_DISTANCE_MS * fs / 1000)
+        self.mwi_window = int(self.MWI_WINDOW_MS * fs / 1000)
+        self.search_window = int(self.SEARCH_WINDOW_MS * fs / 1000)
+        self.warmup_samples = int(self.WARMUP_MS * fs / 1000)
+        
+        # Filter design
         self.sos = butter(2, [5, 15], btype='bandpass', fs=fs, output='sos')
-        self.zi = sosfilt_zi(self.sos)
         
-        # Detection parameters (OPTIMIZED - validated to 99.95% F1)
-        self.min_distance = int(0.35 * fs)  # 350ms (max ~171 BPM) - critical for avoiding false positives
-        self.height_percentile = 80  # 80th percentile threshold
-        self.search_window = int(0.05 * fs)  # 50ms for R-peak refinement
-        self.mwi_window = int(0.08 * fs)  # 80ms MWI window
+        # Signal storage
+        self.signal_buffer = []  # Raw signal
+        self.processed_up_to = 0  # Last processed sample index
+        self.detected_peaks = set()  # All detected R-peak indices (set for O(1) lookup)
+        self.last_peak_idx = -self.min_distance * 2
         
-        # Buffer configuration
-        self.buffer_size = int(2.0 * fs)  # Keep 2 seconds of data
-        
-        # Buffers for signal processing
-        self.signal_buffer = []  # Original signal for R-peak refinement
-        self.filtered_buffer = []  # Bandpass filtered signal
-        self.mwi_buffer = []  # Moving window integration output
-        
-        # Global tracking
-        self.global_idx = 0
-        self.buffer_offset = 0  # Offset due to buffer trimming
-        self.last_peak_idx = -self.min_distance * 2  # Last detected R-peak
-        
-        # Threshold initialization
+        # Threshold (will be set during warmup)
+        self.threshold = None
         self.initialized = False
-        self.warmup_samples = int(2.0 * fs)  # 2 second warmup
-        self.threshold = 0
 
-    def step(self, sample: float) -> Optional[int]:
+    def process_batch(self, start_idx: int, end_idx: int, signal: np.ndarray) -> list:
         """
-        Process one ECG sample.
+        Process a batch of samples and detect R-peaks.
+        
+        This is the main detection method - efficient batch processing.
         
         Args:
-            sample: Raw ECG sample value (will be filtered internally)
+            start_idx: Starting sample index to process
+            end_idx: Ending sample index (exclusive)
+            signal: Full ECG signal array
             
         Returns:
-            Global sample index of detected R-peak, or None
+            List of newly detected R-peak indices
         """
-        # Store original sample for R-peak refinement
-        self.signal_buffer.append(sample)
+        # Ensure we have enough signal
+        if end_idx > len(signal):
+            end_idx = len(signal)
         
-        # Bandpass filter with streaming state preservation
-        filtered_sample, self.zi = sosfilt(self.sos, [sample], zi=self.zi)
-        filtered = filtered_sample[0]
-        self.filtered_buffer.append(filtered)
+        if end_idx <= start_idx:
+            return []
         
-        # Compute MWI value
-        mwi_val = self._compute_mwi()
-        self.mwi_buffer.append(mwi_val)
+        # Need warmup period
+        if end_idx < self.warmup_samples:
+            return []
         
-        buffer_idx = len(self.signal_buffer) - 1
-        global_idx = self.global_idx
-        self.global_idx += 1
+        # Get segment with overlap for edge handling
+        overlap = self.mwi_window + self.search_window + 10
+        seg_start = max(0, start_idx - overlap)
+        segment = signal[seg_start:end_idx].astype(np.float32)
         
-        # Trim buffers if too large
-        if len(self.signal_buffer) > self.buffer_size:
-            trim = len(self.signal_buffer) - self.buffer_size
-            self.signal_buffer = self.signal_buffer[trim:]
-            self.filtered_buffer = self.filtered_buffer[trim:]
-            self.mwi_buffer = self.mwi_buffer[trim:]
-            self.buffer_offset += trim
-            buffer_idx -= trim
+        if len(segment) < self.mwi_window + 10:
+            return []
         
-        # Warmup: compute threshold from initial data
-        if not self.initialized:
-            if self.global_idx >= self.warmup_samples:
-                self.threshold = np.percentile(self.mwi_buffer, self.height_percentile) * self.THRESHOLD_SCALE_FACTOR
-                self.initialized = True
-            return None
+        # Apply bandpass filter
+        filtered = sosfilt(self.sos, segment)
         
-        # Peak detection using local maximum
-        detected = self._detect_peak(buffer_idx, global_idx, mwi_val)
-        
-        return detected
-
-    def _compute_mwi(self) -> float:
-        """Compute Moving Window Integration value for current sample."""
-        n = len(self.filtered_buffer)
-        
-        if n < 5:
-            return 0.0
-        
-        # 5-point derivative
-        deriv = (self.filtered_buffer[-1] - self.filtered_buffer[-5]) + \
-                2 * (self.filtered_buffer[-2] - self.filtered_buffer[-4])
+        # Compute derivative (5-point)
+        deriv = np.zeros_like(filtered)
+        for i in range(4, len(filtered)):
+            deriv[i] = (filtered[i] - filtered[i-4]) + 2 * (filtered[i-1] - filtered[i-3])
         deriv /= 8.0
         
-        # Moving window integration of squared derivative
-        start = max(0, n - self.mwi_window)
-        window_vals = []
-        for i in range(start, n):
-            if i >= 4:
-                d = (self.filtered_buffer[i] - self.filtered_buffer[i-4]) + \
-                    2 * (self.filtered_buffer[i-1] - self.filtered_buffer[i-3])
-                d /= 8.0
-                window_vals.append(d * d)
+        # Square and MWI
+        squared = deriv ** 2
+        mwi = np.convolve(squared, np.ones(self.mwi_window) / self.mwi_window, mode='same')
         
-        return float(np.mean(window_vals)) if window_vals else 0.0
-
-    def _detect_peak(self, buffer_idx: int, global_idx: int, mwi_val: float) -> Optional[int]:
-        """Detect peak using local maximum approach with refractory period."""
-        # Check refractory period (minimum distance between peaks)
-        if global_idx - self.last_peak_idx < self.min_distance:
-            return None
+        # Initialize or update threshold
+        if not self.initialized:
+            self.threshold = np.percentile(mwi, self.HEIGHT_PERCENTILE) * 0.35
+            self.initialized = True
         
-        if len(self.mwi_buffer) < 5:
-            return None
+        # Find peaks using scipy
+        peaks, _ = find_peaks(
+            mwi,
+            height=self.threshold,
+            distance=self.min_distance
+        )
         
-        # Look for local maximum at 2 samples back (confirmation delay)
-        check_idx = buffer_idx - 2
-        if check_idx < 2 or check_idx >= len(self.mwi_buffer) - 2:
-            return None
-        
-        mwi = self.mwi_buffer
-        is_peak = (mwi[check_idx] > mwi[check_idx-1] and 
-                   mwi[check_idx] > mwi[check_idx-2] and
-                   mwi[check_idx] >= mwi[check_idx+1] and 
-                   mwi[check_idx] >= mwi[check_idx+2])
-        
-        if not is_peak:
-            return None
-        
-        peak_val = mwi[check_idx]
-        peak_global = global_idx - 2
-        
-        # Check if above threshold
-        if peak_val > self.threshold:
-            # Update threshold adaptively using class constants
-            self.threshold = (self.THRESHOLD_DECAY * self.threshold + 
-                              self.THRESHOLD_UPDATE * (peak_val * self.PEAK_TO_THRESHOLD_RATIO))
+        # Convert to global indices and filter
+        new_peaks = []
+        for peak_local in peaks:
+            peak_global = seg_start + peak_local
             
-            # Refine to find actual R-peak in original signal
-            refined_global = self._refine_peak_location(check_idx, peak_global)
+            # Skip if before the range we're processing
+            if peak_global < start_idx:
+                continue
             
-            self.last_peak_idx = refined_global
-            return refined_global
+            # Skip if already detected
+            if peak_global in self.detected_peaks:
+                continue
+            
+            # Skip if too close to last peak
+            if peak_global - self.last_peak_idx < self.min_distance:
+                continue
+            
+            # Refine R-peak location in original signal
+            refined = self._refine_peak(peak_global, signal)
+            
+            # Check distance again after refinement
+            if refined - self.last_peak_idx < self.min_distance:
+                continue
+            
+            # Check if already detected (after refinement)
+            if refined in self.detected_peaks:
+                continue
+            
+            # Accept this peak
+            self.detected_peaks.add(refined)
+            self.last_peak_idx = refined
+            new_peaks.append(refined)
+            
+            # Update threshold
+            if peak_local < len(mwi):
+                self.threshold = 0.85 * self.threshold + 0.15 * mwi[peak_local] * 0.35
         
-        return None
+        return new_peaks
 
-    def _refine_peak_location(self, buffer_idx: int, global_idx: int) -> int:
+    def _refine_peak(self, global_idx: int, signal: np.ndarray) -> int:
         """Refine R-peak location by finding maximum in original signal."""
-        search_start = max(0, buffer_idx - self.search_window)
-        search_end = min(len(self.signal_buffer), buffer_idx + self.search_window)
+        search_start = max(0, global_idx - self.search_window)
+        search_end = min(len(signal), global_idx + self.search_window + 1)
         
         if search_end <= search_start:
             return global_idx
         
-        segment = self.signal_buffer[search_start:search_end]
+        segment = signal[search_start:search_end]
         
-        # R-peaks in MLII are typically positive, find maximum
+        # R-peaks in MLII are typically positive
         local_max_idx = int(np.argmax(segment))
-        refined_buffer_idx = search_start + local_max_idx
-        
-        # Return global index
-        return refined_buffer_idx + self.buffer_offset
+        return search_start + local_max_idx
+
+    def get_all_peaks(self) -> list:
+        """Get all detected peaks as sorted list."""
+        return sorted(self.detected_peaks)
 
     def reset(self):
-        """Reset detector state for new recording."""
+        """Reset detector state."""
         self.__init__(self.fs)
 
 
-# Aliases for compatibility
-HamiltonTompkinsDetector = RealtimeRPeakDetector
-PanTompkinsDetector = RealtimeRPeakDetector
+# Main detector class - alias for backward compatibility
+RealtimeRPeakDetector = BatchRPeakDetector
+HamiltonTompkinsDetector = BatchRPeakDetector
+PanTompkinsDetector = BatchRPeakDetector
 
 # Global R-peak detector instance
 rpeak_detector = None
@@ -425,17 +394,15 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
     df.columns = df.columns.str.strip().str.strip("'")
     ecg_data = df['MLII'].values.astype(np.float32)
     
-    # The new RealtimeRPeakDetector does its own filtering internally
-    # So we don't need to pre-filter here anymore
-    # Just store the raw signal for R-peak detection
-    filtered_signal = ecg_data  # Raw signal - detector handles filtering
+    # Raw signal - BatchRPeakDetector handles filtering internally
+    filtered_signal = ecg_data
     
-    # Initialize real-time R-peak detector (validated to 99.95% F1 on record 119)
-    rpeak_detector = RealtimeRPeakDetector(fs=SAMPLING_RATE)
-    print("✓ Real-time R-peak detector initialized")
-    print("   - Validated: 99.95% F1 score on MIT-BIH record 119")
-    print("   - 350ms refractory period (max ~171 BPM)")
-    print("   - 2 second warmup for threshold calibration")
+    # Initialize batch R-peak detector (optimized for 1x speed with look-ahead)
+    rpeak_detector = BatchRPeakDetector(fs=SAMPLING_RATE)
+    print("✓ Batch R-peak detector initialized")
+    print("   - Optimized for real-time with look-ahead detection")
+    print("   - 280ms refractory period (max ~214 BPM)")
+    print("   - 1 second warmup for threshold calibration")
     print("   - Internal bandpass filter 5-15 Hz")
     
     # Load annotations (used only for ground truth comparison, NOT for R-peak positions)
@@ -1820,73 +1787,101 @@ HTML_TEMPLATE = '''
             return Math.round(60 / avgInterval);
         }
         
-        // Check for beats using Pan-Tompkins R-peak detection
-        // This simulates real deployment where no annotation file exists
+        // Look-ahead R-peak detection and classification
+        // Detection runs AHEAD of display, classification when beat is complete
+        const POST_R_SAMPLES = 110;  // v6: 110 samples after R-peak needed for beat extraction
+        const LOOK_AHEAD_SAMPLES = Math.round(SAMPLING_RATE * 0.5);  // 0.5 second look-ahead
+        
+        // Queue for pending classifications (detected but not yet complete)
+        let pendingBeats = [];  // [{r_peak, matched_ann}, ...]
+        
         async function checkForBeats() {
-            // Skip if already processing classifications
+            // Skip if already processing
             if (isClassifying) return;
             
-            // Detect R-peaks in the new samples using server-side Pan-Tompkins
-            if (lastDetectorIndex >= currentIndex) return;
+            // Look-ahead detection: run detector ahead of current display position
+            const detectEnd = Math.min(currentIndex + LOOK_AHEAD_SAMPLES, ecgData.length);
+            
+            if (lastDetectorIndex >= detectEnd) return;
             
             isClassifying = true;
             
             try {
-                // Call server to detect R-peaks in the new sample range
+                // Call server to detect R-peaks in the range
                 const detectResponse = await fetch('/api/detect_rpeak', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
                         start_idx: lastDetectorIndex,
-                        end_idx: currentIndex
+                        end_idx: detectEnd
                     })
                 });
                 const detectResult = await detectResponse.json();
-                lastDetectorIndex = currentIndex;
+                lastDetectorIndex = detectEnd;
                 
-                // Process each detected R-peak
+                // Add newly detected R-peaks to pending queue
                 for (const rPeak of detectResult.detected_peaks) {
-                    // Skip if already processed (avoid duplicates)
                     if (processedBeats.has(rPeak)) continue;
-                    processedBeats.add(rPeak);
                     
-                    // Store detected R-peak for visualization
+                    const matchKey = String(rPeak);
+                    const matchedAnn = detectResult.matched_annotations[matchKey];
+                    
+                    pendingBeats.push({
+                        r_peak: rPeak,
+                        matched_ann: matchedAnn
+                    });
+                    
+                    // Store for visualization (will appear when R-peak scrolls into view)
                     detectedRPeaks.push(rPeak);
+                }
+                
+                // Process pending beats that now have complete windows
+                // A beat is complete when currentIndex >= r_peak + POST_R_SAMPLES
+                const readyBeats = [];
+                const stillPending = [];
+                
+                for (const beat of pendingBeats) {
+                    if (currentIndex >= beat.r_peak + POST_R_SAMPLES) {
+                        readyBeats.push(beat);
+                    } else {
+                        stillPending.push(beat);
+                    }
+                }
+                pendingBeats = stillPending;
+                
+                // Classify ready beats
+                for (const beat of readyBeats) {
+                    if (processedBeats.has(beat.r_peak)) continue;
+                    processedBeats.add(beat.r_peak);
                     
-                    // Limit processed beats set size to prevent memory issues
+                    // Limit processed beats set size
                     if (processedBeats.size > 5000) {
                         const toRemove = [...processedBeats].slice(0, 1000);
                         toRemove.forEach(v => processedBeats.delete(v));
                     }
                     
-                    // Get matching annotation if available (for ground truth)
-                    const matchKey = String(rPeak);
-                    const matchedAnn = detectResult.matched_annotations[matchKey];
-                    const beatType = matchedAnn ? matchedAnn.beat_type : null;
+                    const beatType = beat.matched_ann ? beat.matched_ann.beat_type : null;
                     
                     try {
-                        // Classify the beat at the DETECTED R-peak position
                         const response = await fetch('/api/classify', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({
-                                r_peak: rPeak,
-                                beat_type: beatType  // May be null if no matching annotation
+                                r_peak: beat.r_peak,
+                                beat_type: beatType
                             })
                         });
                         const result = await response.json();
                         
-                        // Log with indication of whether ground truth is available
                         if (beatType) {
-                            console.log('[ECG] Detected R-peak at', rPeak, '(matched ann:', matchedAnn.sample_index, ') →', result.predicted);
+                            console.log('[ECG] Classified R-peak at', beat.r_peak, '(matched ann:', beat.matched_ann.sample_index, ') →', result.predicted);
                         } else {
-                            console.log('[ECG] Detected R-peak at', rPeak, '(no matching annotation) →', result.predicted);
+                            console.log('[ECG] Classified R-peak at', beat.r_peak, '(no matching annotation) →', result.predicted);
                         }
                         
                         addClassification(result);
                         
-                        // Calculate heart rate
-                        const bpm = calculateBPM(rPeak);
+                        const bpm = calculateBPM(beat.r_peak);
                         if (bpm !== null && bpm > 0 && bpm < 300) {
                             document.getElementById('heartRate').textContent = bpm;
                         }
@@ -2111,13 +2106,14 @@ HTML_TEMPLATE = '''
             // Reset high-speed stability tracking
             isClassifying = false;
             classificationQueue = [];
+            pendingBeats = [];  // Reset pending beats queue
             processedBeats.clear();
             lastDetectorIndex = 0;  // Reset detector position
             
-            // Reset server-side Pan-Tompkins detector
+            // Reset server-side detector
             try {
                 await fetch('/api/reset_detector', { method: 'POST' });
-                console.log('[ECG] Pan-Tompkins detector reset');
+                console.log('[ECG] Batch R-peak detector reset');
             } catch (e) {
                 console.error('Failed to reset detector:', e);
             }
@@ -2203,10 +2199,10 @@ def get_data():
 @app.route('/api/detect_rpeak', methods=['POST'])
 def detect_rpeak():
     """
-    Detect R-peak for a range of samples using Pan-Tompkins algorithm.
+    Detect R-peaks for a range of samples using batch processing.
     
-    This endpoint processes new ECG samples and returns any detected R-peaks.
-    It simulates real-time R-peak detection as would be done in actual deployment.
+    This endpoint processes ECG samples in batches for efficiency.
+    Uses scipy.signal.find_peaks for reliable detection.
     
     Request JSON:
         start_idx: Starting sample index
@@ -2220,21 +2216,17 @@ def detect_rpeak():
     
     data = request.json
     start_idx = data.get('start_idx', 0)
-    end_idx = data.get('end_idx', len(filtered_signal))
+    end_idx = data.get('end_idx', len(ecg_data))
     
-    detected_peaks = []
+    # Use batch processing for efficiency
+    detected_peaks = rpeak_detector.process_batch(start_idx, end_idx, ecg_data)
+    
+    # Find matching annotations for each detected peak
     matched_annotations = {}
-    
-    # Process each sample through the detector
-    for i in range(start_idx, min(end_idx, len(filtered_signal))):
-        r_peak = rpeak_detector.step(filtered_signal[i])
-        if r_peak is not None:
-            detected_peaks.append(r_peak)
-            
-            # Try to find matching annotation for ground truth
-            match = find_matching_annotation(r_peak)
-            if match:
-                matched_annotations[str(r_peak)] = match
+    for r_peak in detected_peaks:
+        match = find_matching_annotation(r_peak)
+        if match:
+            matched_annotations[str(r_peak)] = match
     
     return jsonify({
         'detected_peaks': detected_peaks,
@@ -2275,7 +2267,7 @@ def get_model_info():
         'name': model_config['name'],
         'onnx_file': model_config['onnx_file'],
         'scaler_file': model_config['scaler_file'],
-        'r_peak_detection': 'Optimized Pan-Tompkins (99.95% F1)',
+        'r_peak_detection': 'Batch detector with look-ahead',
         'r_peak_tolerance': R_PEAK_TOLERANCE,
     })
 
@@ -2288,8 +2280,8 @@ def reset_detector():
     """
     global rpeak_detector, beat_buffer
     
-    # Reset the detector with same parameters as load_data
-    rpeak_detector = RealtimeRPeakDetector(fs=SAMPLING_RATE)
+    # Reset the batch detector
+    rpeak_detector = BatchRPeakDetector(fs=SAMPLING_RATE)
     
     # Reset the beat buffer for v6 context-aware model
     beat_buffer = []
@@ -2311,7 +2303,7 @@ def main():
     
     print("=" * 60)
     print("ECG Real-Time Classification Frontend")
-    print("Using PyTorch ONNX Models + Pan-Tompkins R-Peak Detection")
+    print("Using PyTorch ONNX Models + Look-Ahead R-Peak Detection")
     print("=" * 60)
     
     print(f"\nSelected model: {args.model.upper()}")
@@ -2323,10 +2315,11 @@ def main():
     else:
         print(f"  Single-beat classification: 188 samples (70 before + 118 after R-peak)")
     
-    print("\nR-Peak Detection: Pan-Tompkins Algorithm")
+    print("\nR-Peak Detection: Batch Detector with Look-Ahead")
     print(f"  Tolerance for ground truth matching: {R_PEAK_TOLERANCE} samples (~{R_PEAK_TOLERANCE/SAMPLING_RATE*1000:.0f}ms)")
     print("  NOTE: R-peaks detected by algorithm, NOT from annotation file")
     print("  Annotations used only for ground truth validation when matched")
+    print("  Look-ahead: Detection runs 0.5s ahead of display for timely classification")
     
     # All models now use record 119 by default
     # --training-data flag allows falling back to demo data (deprecated)
