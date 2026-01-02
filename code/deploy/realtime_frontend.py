@@ -1507,24 +1507,54 @@ HTML_TEMPLATE = '''
         }
         
         // Download all saved batches
-        function downloadAllBatches() {
-            if (savedBatches.length === 0) {
-                alert('No batches saved yet. Recording auto-saves batches every 2 minutes.');
-                return;
+        // Core batch download logic (shared by both manual and auto download)
+        function performBatchDownloads(onComplete = null) {
+            const totalBatches = savedBatches.length;
+            const totalSeconds = savedBatches.reduce((sum, b) => sum + (b.endSample - b.startSample), 0) / SAMPLING_RATE;
+            
+            // Show downloading status
+            const statusEl = document.getElementById('batchStatus');
+            if (statusEl) {
+                statusEl.innerHTML = `
+                    <span style="color: #00ff88;">📥 Downloading ${totalBatches} batch${totalBatches !== 1 ? 'es' : ''}...</span>
+                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
+                `;
             }
             
-            console.log(`[ECG] Downloading ${savedBatches.length} saved batches...`);
-            
-            // Download each batch with a small delay to prevent browser blocking
+            // Download each batch with a delay to prevent browser blocking
             savedBatches.forEach((batch, idx) => {
                 setTimeout(() => {
                     const link = document.createElement('a');
                     link.download = `ecg_batch_${batch.batchNum}_${batch.timestamp.replace(/[:.]/g, '-')}.png`;
                     link.href = batch.dataURL;
                     link.click();
-                    console.log(`[ECG] Downloaded batch ${batch.batchNum}`);
+                    console.log(`[ECG] Downloaded batch ${batch.batchNum}/${totalBatches}`);
+                    
+                    // Update status after last download
+                    if (idx === savedBatches.length - 1) {
+                        setTimeout(() => {
+                            if (statusEl) {
+                                statusEl.innerHTML = `
+                                    <span style="color: #00ff88;">✅ ${totalBatches} batch${totalBatches !== 1 ? 'es' : ''} downloaded!</span>
+                                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
+                                `;
+                            }
+                            if (onComplete) onComplete();
+                        }, 500);
+                    }
                 }, idx * BATCH_DOWNLOAD_DELAY_MS);
             });
+        }
+        
+        // Manual download all batches (called by button click)
+        function downloadAllBatches() {
+            if (savedBatches.length === 0) {
+                alert('No batches saved yet. Recording auto-saves batches every 2 minutes.');
+                return;
+            }
+            
+            console.log(`[ECG] Manual download: ${savedBatches.length} saved batches...`);
+            performBatchDownloads();
         }
         
         // Export only unsaved data (faster than full export)
@@ -2052,49 +2082,9 @@ HTML_TEMPLATE = '''
                 console.log('[ECG] Auto-downloading all batches on stop...');
                 // Small delay to let the final batch save complete
                 setTimeout(() => {
-                    autoDownloadAllBatches();
+                    performBatchDownloads();
                 }, 500);
             }
-        }
-        
-        // Auto-download all batches (called automatically on stop)
-        function autoDownloadAllBatches() {
-            if (savedBatches.length === 0) return;
-            
-            const totalBatches = savedBatches.length;
-            const totalSeconds = savedBatches.reduce((sum, b) => sum + (b.endSample - b.startSample), 0) / SAMPLING_RATE;
-            
-            // Show notification
-            const statusEl = document.getElementById('batchStatus');
-            if (statusEl) {
-                statusEl.innerHTML = `
-                    <span style="color: #00ff88;">📥 Auto-downloading ${totalBatches} batch${totalBatches !== 1 ? 'es' : ''}...</span>
-                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
-                `;
-            }
-            
-            // Download each batch with a delay to prevent browser blocking
-            savedBatches.forEach((batch, idx) => {
-                setTimeout(() => {
-                    const link = document.createElement('a');
-                    link.download = `ecg_batch_${batch.batchNum}_${batch.timestamp.replace(/[:.]/g, '-')}.png`;
-                    link.href = batch.dataURL;
-                    link.click();
-                    console.log(`[ECG] Auto-downloaded batch ${batch.batchNum}/${totalBatches}`);
-                    
-                    // Update status after last download
-                    if (idx === savedBatches.length - 1) {
-                        setTimeout(() => {
-                            if (statusEl) {
-                                statusEl.innerHTML = `
-                                    <span style="color: #00ff88;">✅ ${totalBatches} batch${totalBatches !== 1 ? 'es' : ''} downloaded!</span>
-                                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
-                                `;
-                            }
-                        }, 500);
-                    }
-                }, idx * BATCH_DOWNLOAD_DELAY_MS);
-            });
         }
         
         function resetSimulation() {
