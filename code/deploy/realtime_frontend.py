@@ -400,6 +400,7 @@ HTML_TEMPLATE = '''
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ECG Real-Time Classification</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -699,7 +700,7 @@ HTML_TEMPLATE = '''
                 <button id="fwdBtn" onclick="scrollHistory(1)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">▶ +1s</button>
                 <button id="fwd5Btn" onclick="scrollHistory(5)" disabled style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; cursor: pointer;">⏩ +5s</button>
                 <span style="margin: 0 10px; color: #444;">|</span>
-                <button onclick="downloadAllBatches()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;" title="Manual download (auto-downloads on Stop)">📦 Re-download Batches</button>
+                <button onclick="downloadAllBatches()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;" title="Download all batches as ZIP">📦 Download Batches (ZIP)</button>
             </div>
             <div id="batchStatus" style="text-align: center; margin-top: 8px; font-size: 12px;">
                 <span style="color: #888;">📦 Auto-batch: saves every 2 min, auto-downloads on Stop</span>
@@ -808,7 +809,6 @@ HTML_TEMPLATE = '''
         const MIN_BATCH_SECONDS = 5;  // Minimum seconds for a batch
         const MIN_BATCH_SAMPLES = MIN_BATCH_SECONDS * SAMPLING_RATE;
         const BATCH_CHECK_INTERVAL_MS = 5000;  // Check for auto-batch every 5 seconds
-        const BATCH_DOWNLOAD_DELAY_MS = 500;  // Delay between batch downloads
         const BATCH_GRID_SPACING = 30;  // Grid spacing in batch canvas
         let savedBatches = [];  // Array of {startSample, endSample, dataURL, timestamp}
         let lastBatchEndSample = 0;  // Track where last batch ended
@@ -1507,55 +1507,70 @@ HTML_TEMPLATE = '''
             `;
         }
         
-        // Download all saved batches
-        // Core batch download logic (shared by both manual and auto download)
-        function performBatchDownloads(onComplete = null) {
-            const totalBatches = savedBatches.length;
-            const totalSeconds = savedBatches.reduce((sum, b) => sum + (b.endSample - b.startSample), 0) / SAMPLING_RATE;
-            
-            // Show downloading status
-            const statusEl = document.getElementById('batchStatus');
-            if (statusEl) {
-                statusEl.innerHTML = `
-                    <span style="color: #00ff88;">📥 Downloading ${totalBatches} batch${totalBatches !== 1 ? 'es' : ''}...</span>
-                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
-                `;
-            }
-            
-            // Download each batch with a delay to prevent browser blocking
-            savedBatches.forEach((batch, idx) => {
-                setTimeout(() => {
-                    const link = document.createElement('a');
-                    link.download = `ecg_batch_${batch.batchNum}_${batch.timestamp.replace(/[:.]/g, '-')}.png`;
-                    link.href = batch.dataURL;
-                    link.click();
-                    console.log(`[ECG] Downloaded batch ${batch.batchNum}/${totalBatches}`);
-                    
-                    // Update status after last download
-                    if (idx === savedBatches.length - 1) {
-                        setTimeout(() => {
-                            if (statusEl) {
-                                statusEl.innerHTML = `
-                                    <span style="color: #00ff88;">✅ ${totalBatches} batch${totalBatches !== 1 ? 'es' : ''} downloaded!</span>
-                                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
-                                `;
-                            }
-                            if (onComplete) onComplete();
-                        }, 500);
-                    }
-                }, idx * BATCH_DOWNLOAD_DELAY_MS);
-            });
-        }
-        
-        // Manual download all batches (called by button click)
-        function downloadAllBatches() {
+        // Download all saved batches as a single ZIP file
+        async function downloadAllBatches() {
             if (savedBatches.length === 0) {
                 alert('No batches saved yet. Recording auto-saves batches every 2 minutes.');
                 return;
             }
             
-            console.log(`[ECG] Manual download: ${savedBatches.length} saved batches...`);
-            performBatchDownloads();
+            const totalBatches = savedBatches.length;
+            const totalSeconds = savedBatches.reduce((sum, b) => sum + (b.endSample - b.startSample), 0) / SAMPLING_RATE;
+            
+            // Show creating ZIP status
+            const statusEl = document.getElementById('batchStatus');
+            if (statusEl) {
+                statusEl.innerHTML = `
+                    <span style="color: #ffaa00;">📦 Creating ZIP (${totalBatches} batch${totalBatches !== 1 ? 'es' : ''})...</span>
+                    <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
+                `;
+            }
+            
+            console.log(`[ECG] Creating ZIP with ${totalBatches} batches...`);
+            
+            try {
+                // Create ZIP file
+                const zip = new JSZip();
+                
+                // Add each batch to the ZIP
+                for (const batch of savedBatches) {
+                    // Convert data URL to blob
+                    const dataURL = batch.dataURL;
+                    const base64Data = dataURL.split(',')[1];
+                    const filename = `ecg_batch_${batch.batchNum}_${batch.timestamp.replace(/[:.]/g, '-')}.png`;
+                    zip.file(filename, base64Data, {base64: true});
+                }
+                
+                // Generate ZIP blob
+                const zipBlob = await zip.generateAsync({type: 'blob'});
+                
+                // Create download link
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                const link = document.createElement('a');
+                link.download = `ecg_recording_${timestamp}.zip`;
+                link.href = URL.createObjectURL(zipBlob);
+                link.click();
+                
+                // Cleanup
+                setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+                
+                console.log('[ECG] ZIP downloaded successfully');
+                
+                if (statusEl) {
+                    statusEl.innerHTML = `
+                        <span style="color: #00ff88;">✅ ZIP downloaded (${totalBatches} batch${totalBatches !== 1 ? 'es' : ''})!</span>
+                        <span style="color: #888; margin-left: 10px;">(${totalSeconds.toFixed(0)}s total)</span>
+                    `;
+                }
+            } catch (error) {
+                console.error('[ECG] Error creating ZIP:', error);
+                alert('Error creating ZIP file. Please try again.');
+                if (statusEl) {
+                    statusEl.innerHTML = `
+                        <span style="color: #ff4444;">❌ Error creating ZIP</span>
+                    `;
+                }
+            }
         }
         
         // Export only unsaved data (faster than full export)
@@ -2078,14 +2093,8 @@ HTML_TEMPLATE = '''
                 saveBatch(lastBatchEndSample, currentIndex);
             }
             
-            // AUTO-DOWNLOAD: Download all batches automatically when stopped
-            if (savedBatches.length > 0) {
-                console.log('[ECG] Auto-downloading all batches on stop...');
-                // Small delay to let the final batch save complete
-                setTimeout(() => {
-                    performBatchDownloads();
-                }, 500);
-            }
+            // Update batch status - user can click Download button when ready
+            updateBatchStatus();
         }
         
         function resetSimulation() {
