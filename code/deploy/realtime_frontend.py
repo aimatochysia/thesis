@@ -887,15 +887,16 @@ HTML_TEMPLATE = '''
         
         // Resize canvas to be pixel-perfect
         function resizeCanvas() {
-            // Ensure canvas height never shrinks below max achieved
-            const currentCSSHeight = parseInt(canvas.style.height) || MIN_GRAPH_HEIGHT;
-            if (currentCSSHeight < maxGraphHeight) {
-                canvas.style.height = maxGraphHeight + 'px';
-            }
+            // ALWAYS ensure CSS height is at least maxGraphHeight (never shrink)
+            // Set it every time to guarantee stability
+            canvas.style.height = maxGraphHeight + 'px';
             
             const rect = canvas.getBoundingClientRect();
             canvas.width = rect.width * window.devicePixelRatio;
-            canvas.height = rect.height * window.devicePixelRatio;
+            // Use maxGraphHeight directly instead of getBoundingClientRect for height
+            // This ensures the canvas never shrinks even during CSS transitions
+            const heightToUse = Math.max(rect.height, maxGraphHeight);
+            canvas.height = heightToUse * window.devicePixelRatio;
             ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
             
             // Also resize beat canvas
