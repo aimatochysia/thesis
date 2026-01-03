@@ -785,6 +785,11 @@ HTML_TEMPLATE = '''
         const MIN_GRAPH_HEIGHT = 300;  // Minimum height
         const MAX_GRAPH_HEIGHT = 800;  // Maximum allowed height
         
+        // Y-axis scale tracking - expand to fit largest signal seen, but never shrink
+        // This ensures consistent vertical scale across the entire recording
+        let globalMinVal = Infinity;   // Track minimum value seen across all data
+        let globalMaxVal = -Infinity;  // Track maximum value seen across all data
+        
         // History navigation
         let viewOffset = 0;  // 0 = live view, negative = viewing history
         let isLive = true;
@@ -1674,6 +1679,10 @@ HTML_TEMPLATE = '''
             ecgData = data.signal;
             annotations = data.annotations;
             console.log(`Loaded ${ecgData.length} ECG samples and ${annotations.length} annotations`);
+            
+            // Reset Y-axis tracking for new data
+            globalMinVal = Infinity;
+            globalMaxVal = -Infinity;
         }
         
         // Draw ECG signal
@@ -1713,9 +1722,18 @@ HTML_TEMPLATE = '''
             
             if (buffer.length < 2) return;
             
-            // Find min/max for scaling
-            const minVal = Math.min(...buffer);
-            const maxVal = Math.max(...buffer);
+            // Find min/max for the current buffer
+            const localMinVal = Math.min(...buffer);
+            const localMaxVal = Math.max(...buffer);
+            
+            // Update global min/max - expand to fit largest signal seen, but never shrink
+            // This ensures Y-axis scale remains consistent across entire recording
+            if (localMinVal < globalMinVal) globalMinVal = localMinVal;
+            if (localMaxVal > globalMaxVal) globalMaxVal = localMaxVal;
+            
+            // Use global values for scaling (stable Y-axis that expands but never shrinks)
+            const minVal = globalMinVal;
+            const maxVal = globalMaxVal;
             const range = maxVal - minVal || 1;
             
             // Dynamic height expansion based on signal amplitude and content
@@ -2111,6 +2129,13 @@ HTML_TEMPLATE = '''
             isClassifying = false;
             classificationQueue = [];
             processedBeats.clear();
+            
+            // Reset Y-axis tracking (allow scale to adjust from start)
+            globalMinVal = Infinity;
+            globalMaxVal = -Infinity;
+            
+            // Reset graph height tracking
+            maxGraphHeight = MIN_GRAPH_HEIGHT;
             
             // Reset batch state
             savedBatches = [];
