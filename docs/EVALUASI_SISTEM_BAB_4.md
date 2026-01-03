@@ -1,22 +1,10 @@
-# Evaluasi Sistem Klasifikasi ECG Real-Time
+## 4.x Evaluasi Sistem Frontend Deployment
 
-## BAB 4: Evaluasi Sistem Frontend Deployment
+Subbab ini menjelaskan evaluasi sistem deployment frontend yang mensimulasikan pemantauan ECG real-time dalam lingkungan klinis.
 
-### 4.1 Ringkasan Sistem
+### 4.x.1 Arsitektur Frontend Deployment
 
-Sistem klasifikasi ECG real-time ini terdiri dari tiga komponen utama yang bekerja secara terintegrasi:
-
-1. **Dataset Modifier** - Pemrosesan dan modifikasi dataset MIT-BIH
-2. **Model Training (v6)** - Pelatihan model CNN1D Context-Aware
-3. **Frontend Deployment** - Antarmuka web untuk simulasi dan klasifikasi real-time
-
-Dokumen ini fokus pada **evaluasi sistem deployment frontend** yang mensimulasikan lingkungan klinis nyata.
-
----
-
-### 4.2 Arsitektur Frontend Deployment
-
-#### 4.2.1 Aliran Data Sistem
+#### Aliran Data Sistem
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -62,7 +50,7 @@ Dokumen ini fokus pada **evaluasi sistem deployment frontend** yang mensimulasik
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 4.2.2 Komponen Teknis
+#### Komponen Teknis
 
 | Komponen | Deskripsi | Detail |
 |----------|-----------|--------|
@@ -73,7 +61,7 @@ Dokumen ini fokus pada **evaluasi sistem deployment frontend** yang mensimulasik
 
 ---
 
-### 4.3 Mengapa Menggunakan Record 119?
+### 4.x.2 Penggunaan Record 119
 
 Record 119 dipilih sebagai data pengujian karena beberapa alasan penting:
 
@@ -89,9 +77,9 @@ use_record_119 = True  # Default untuk v2, v3, v5, dan v6
 
 ---
 
-### 4.4 Pipeline Preprocessing (Sama Persis dengan Training)
+### 4.x.3 Pipeline Preprocessing
 
-#### 4.4.1 Ekstraksi Beat
+#### Ekstraksi Beat
 
 Setiap beat diekstraksi dengan 200 sampel yang berpusat pada R-peak:
 
@@ -127,7 +115,7 @@ def extract_beat_v6(signal, r_peak_idx):
 | Post-R | 110 | ~306ms | Menangkap ST-segment dan gelombang T |
 | **Total** | **200** | **~556ms** | Cukup untuk kompleks PQRST lengkap |
 
-#### 4.4.2 Rolling Buffer 7 Beat
+#### Rolling Buffer 7 Beat
 
 ```python
 # Buffer global untuk model v6 context-aware
@@ -165,7 +153,7 @@ Pola aritmia yang dapat dideteksi:
 - **Pause Kompensatori**: Pause setelah PVC
 - **AV Block**: Perubahan sistematis pada interval PR
 
-#### 4.4.3 Normalisasi (Kritis - Harus Sama dengan Training)
+#### Normalisasi
 
 ```python
 def prepare_input():
@@ -194,7 +182,7 @@ def prepare_input():
 
 ---
 
-### 4.5 Proses Inferensi ONNX
+### 4.x.4 Proses Inferensi ONNX
 
 ```python
 def run_inference():
@@ -222,7 +210,7 @@ def run_inference():
 
 ---
 
-### 4.6 Perbandingan Ground Truth
+### 4.x.5 Perbandingan Ground Truth
 
 ```python
 def get_ground_truth(beat_type):
@@ -236,9 +224,9 @@ Beat tengah (indeks 3 dalam window 7 beat) digunakan untuk ground truth karena:
 
 ---
 
-### 4.7 Fitur Antarmuka Pengguna
+### 4.x.6 Fitur Antarmuka Pengguna
 
-#### 4.7.1 Kontrol Kecepatan
+#### Kontrol Kecepatan
 
 ```python
 # Preset kecepatan (pengali dari real-time)
@@ -247,7 +235,7 @@ speeds = [0.1, 0.5, 1, 5, 10]
 # 10x = 3600 sampel/detik (playback 10x lebih cepat)
 ```
 
-#### 4.7.2 Perhitungan BPM
+#### Perhitungan BPM
 
 ```python
 def calculateBPM(currentBeatSample):
@@ -275,7 +263,7 @@ def calculateBPM(currentBeatSample):
 - Memfilter beat yang terlewat atau deteksi ganda
 - Menghaluskan tampilan agar tidak berfluktuasi
 
-#### 4.7.3 Navigasi Riwayat
+#### Navigasi Riwayat
 
 ```python
 # Kontrol navigasi
@@ -286,7 +274,7 @@ scrollHistory(+1)  # Maju 1 detik (jika melihat riwayat)
 scrollHistory(+5)  # Maju 5 detik
 ```
 
-#### 4.7.4 Log Deteksi Salah
+#### Log Deteksi Salah
 
 ```python
 if result.ground_truth != result.predicted:
@@ -303,9 +291,9 @@ Deteksi salah yang dapat diklik memungkinkan navigasi ke waktu spesifik dalam si
 
 ---
 
-### 4.8 Fitur Stabilitas Grafik
+### 4.x.7 Fitur Stabilitas Grafik
 
-#### 4.8.1 Tinggi Grafik Stabil
+#### Tinggi Grafik Stabil
 
 Tinggi grafik ECG diimplementasikan dengan prinsip "hanya bisa membesar, tidak bisa mengecil":
 
@@ -321,7 +309,7 @@ function updateGraphHeight(newHeight) {
 }
 ```
 
-#### 4.8.2 Skala Y-Axis Stabil
+#### Skala Y-Axis Stabil
 
 Skala vertikal juga diimplementasikan dengan prinsip yang sama:
 
@@ -346,9 +334,9 @@ function updateYAxisScale(bufferMin, bufferMax) {
 
 ---
 
-### 4.9 Sistem Ekspor Otomatis
+### 4.x.8 Sistem Ekspor Otomatis
 
-#### 4.9.1 Auto-Batch Export
+#### Auto-Batch Export
 
 Sistem ekspor dirancang untuk kemudahan pengguna (dokter/perawat):
 
@@ -364,7 +352,7 @@ setInterval(function() {
 }, BATCH_CHECK_INTERVAL_MS);
 ```
 
-#### 4.9.2 Download sebagai ZIP
+#### Download sebagai ZIP
 
 Semua batch dibundel dalam satu file ZIP untuk kemudahan:
 
@@ -398,7 +386,7 @@ async function downloadAllBatches() {
 
 ---
 
-### 4.10 Performa yang Diharapkan
+### 4.x.9 Performa yang Diharapkan
 
 Berdasarkan evaluasi pada data test set (yang termasuk pasien yang tidak pernah dilihat seperti record 119):
 
@@ -416,33 +404,7 @@ Berdasarkan evaluasi pada data test set (yang termasuk pasien yang tidak pernah 
 
 ---
 
-### 4.11 Troubleshooting
-
-#### 4.11.1 Status "MENUNGGU"
-
-Jika tampilan menunjukkan "MENUNGGU" untuk 3 beat pertama:
-- Ini adalah perilaku yang diharapkan
-- Buffer 7 beat perlu terisi sebelum inferensi
-- Tunggu sampai 7 R-peak terdeteksi
-
-#### 4.11.2 Error Loading Model
-
-```bash
-# Periksa file model ada
-ls sample/context_ecg_model.onnx
-ls sample/context_ecg_scaler.pkl
-```
-
-#### 4.11.3 Ketidakcocokan Prediksi
-
-Jika prediksi tidak cocok dengan ground truth:
-1. **Diharapkan**: ~55% recall pada beat abnormal
-2. **Distribusi Record 119**: Periksa rasio normal/abnormal
-3. **Distribution Shift**: Record 119 mungkin memiliki karakteristik berbeda dari data training
-
----
-
-### 4.12 Kesimpulan Evaluasi Sistem
+### 4.x.10 Kesimpulan Evaluasi Sistem
 
 Sistem deployment frontend berhasil mengimplementasikan:
 
@@ -454,23 +416,3 @@ Sistem deployment frontend berhasil mengimplementasikan:
 6. **Kemudahan Penggunaan** - Ekspor otomatis, stabilitas grafik, navigasi intuitif
 
 Sistem ini siap untuk demonstrasi dan validasi lebih lanjut dalam lingkungan klinis yang terkontrol.
-
----
-
-## Referensi
-
-[1] Moody, G. B., & Mark, R. G. (2001). *The impact of the MIT-BIH Arrhythmia Database.* IEEE Engineering in Medicine and Biology Magazine, 20(3), 45-50.
-
-[2] Goldberger, A. L., et al. (2000). *PhysioBank, PhysioToolkit, and PhysioNet.* Circulation, 101(23), e215-e220.
-
-[3] Pan, J., & Tompkins, W. J. (1985). *A real-time QRS detection algorithm.* IEEE Transactions on Biomedical Engineering, BME-32(3), 230-236.
-
-[4] Hannun, A. Y., et al. (2019). *Cardiologist-level arrhythmia detection and classification in ambulatory electrocardiograms using a deep neural network.* Nature Medicine, 25(1), 65-69.
-
-[5] Acharya, U. R., et al. (2017). *A deep convolutional neural network model to classify heartbeats.* Computers in Biology and Medicine, 89, 389-396.
-
-[6] de Chazal, P., et al. (2004). *Automatic classification of heartbeats using ECG morphology and heartbeat interval features.* IEEE Transactions on Biomedical Engineering, 51(7), 1196-1206.
-
-[7] Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning.* MIT Press.
-
-[8] Yildirim, O., et al. (2018). *Arrhythmia detection using deep convolutional neural network with long duration ECG signals.* Computers in Biology and Medicine, 102, 411-420.
