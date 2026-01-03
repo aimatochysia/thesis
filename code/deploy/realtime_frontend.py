@@ -703,9 +703,9 @@ HTML_TEMPLATE = '''
                 <button onclick="downloadAllBatches()" style="padding: 5px 15px; font-size: 12px; border-radius: 15px; background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); color: #00ff88; cursor: pointer;" title="Download all batches as ZIP">📦 Download Batches (ZIP)</button>
             </div>
             <div id="batchStatus" style="text-align: center; margin-top: 8px; font-size: 12px;">
-                <span style="color: #888;">📦 Auto-batch: saves every 2 min, auto-downloads on Stop</span>
+                <span style="color: #888;">📦 Auto-saves every 2 min | Click button to download as ZIP</span>
             </div>
-            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 5px;">💡 Drag the graph to scroll through history | Press Stop to auto-save &amp; download all batches</p>
+            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 5px;">💡 Drag the graph to scroll through history | Batches auto-save, download ZIP when ready</p>
         </div>
         
         <!-- Beat Snapshot Panel - Shows the current beat segment sent to ONNX model -->
