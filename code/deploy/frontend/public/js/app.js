@@ -1,22 +1,7 @@
-/**
- * ECG Real-Time Classification App
- * 
- * Main application logic for the ECG real-time classification frontend.
- * Coordinates between renderers, API, and UI components.
- */
-
-// ============================================================
-// CONSTANTS
-// ============================================================
-
-const SAMPLING_RATE = 360;  // MIT-BIH sampling rate
+const SAMPLING_RATE = 360;
 const DISPLAY_SECONDS = 5;
 const DISPLAY_SAMPLES = SAMPLING_RATE * DISPLAY_SECONDS;
 const TARGET_FPS = 60;
-
-// ============================================================
-// STATE
-// ============================================================
 
 let ecgData = [];
 let annotations = [];
@@ -32,20 +17,13 @@ let viewOffset = 0;
 let isLive = true;
 let lastFrameTime = 0;
 
-// Renderers
 let ecgRenderer = null;
 let beatRenderer = null;
 
-// ============================================================
-// INITIALIZATION
-// ============================================================
-
 document.addEventListener('DOMContentLoaded', async () => {
-    // Initialize renderers
     ecgRenderer = new ECGRenderer('ecgCanvas');
     beatRenderer = new BeatRenderer('beatCanvas');
     
-    // Set up drag callback for interactive scrolling
     ecgRenderer.setDragCallback((deltaSeconds) => {
         if (currentIndex < DISPLAY_SAMPLES) return;
         
@@ -59,21 +37,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateTime();
     });
     
-    // Load model info
     await loadModelInfo();
-    
-    // Load ECG data
     await loadData();
-    
-    // Initial render
     drawECG();
     
     console.log('ECG Real-Time Classification App initialized');
 });
 
-/**
- * Load ECG signal and annotations from backend
- */
 async function loadData() {
     try {
         console.log('[ECG] Loading ECG data from backend...');
@@ -89,15 +59,11 @@ async function loadData() {
     }
 }
 
-/**
- * Load model information from backend
- */
 async function loadModelInfo() {
     try {
         const status = await api.getStatus();
         document.getElementById('modelName').textContent = status.model.name;
         
-        // Update beat samples info
         const beatLength = status.model.beat_length || 188;
         document.getElementById('beatSamplesInfo').textContent = 
             `${beatLength} samples extracted around R-peak`;
@@ -107,23 +73,15 @@ async function loadModelInfo() {
     }
 }
 
-/**
- * Show error message to user
- */
 function showError(message) {
     console.error(message);
-    alert(message);  // Simple alert for thesis demo; production would use toast notifications
+    alert(message);
 }
-
-// ============================================================
-// SPEED CONTROL
-// ============================================================
 
 function setSpeed(speed) {
     speedMultiplier = speed;
     document.getElementById('speedValue').textContent = speed + 'x';
     
-    // Update button states
     document.querySelectorAll('.speed-btn').forEach(btn => {
         btn.classList.remove('active');
         if (btn.textContent === speed + 'x') {
@@ -131,13 +89,8 @@ function setSpeed(speed) {
         }
     });
     
-    // Notify backend
     api.control('set_speed', { speed }).catch(console.error);
 }
-
-// ============================================================
-// HISTORY NAVIGATION
-// ============================================================
 
 function scrollHistory(seconds) {
     if (currentIndex < DISPLAY_SAMPLES) return;
@@ -183,10 +136,6 @@ function updateHistoryUI() {
     fwd5Btn.disabled = isLive;
 }
 
-// ============================================================
-// RENDERING
-// ============================================================
-
 function drawECG() {
     let endSample = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
     let startSample = Math.max(0, endSample - DISPLAY_SAMPLES);
@@ -217,10 +166,6 @@ function updateTime() {
     const secs = (seconds % 60).toFixed(3);
     document.getElementById('currentTime').textContent = `${minutes}:${secs.padStart(6, '0')}`;
 }
-
-// ============================================================
-// BEAT CLASSIFICATION
-// ============================================================
 
 async function checkForBeats() {
     const samplesToCheck = Math.max(1, Math.round(speedMultiplier * (SAMPLING_RATE / TARGET_FPS)));
@@ -276,12 +221,6 @@ function updateCurrentStatus(result) {
     const statusEl = document.getElementById('currentStatus');
     statusEl.textContent = result.predicted;
     statusEl.className = 'value ' + result.predicted.toLowerCase();
-    
-    const prob = result.probability;
-    const probBar = document.getElementById('probBar');
-    probBar.style.width = (prob * 100) + '%';
-    probBar.style.background = prob >= 0.5 ? '#ff4757' : '#00ff88';
-    document.getElementById('probText').textContent = `Abnormal Probability: ${(prob * 100).toFixed(1)}%`;
 }
 
 function updateBeatSnapshot(result) {
@@ -324,7 +263,6 @@ function updateClassificationList(result) {
     `;
     listEl.insertBefore(item, listEl.firstChild);
     
-    // Limit list size
     while (listEl.children.length > 100) {
         listEl.removeChild(listEl.lastChild);
     }
@@ -353,10 +291,6 @@ function updateFalseDetectionList() {
         listEl.appendChild(item);
     });
 }
-
-// ============================================================
-// ANIMATION LOOP
-// ============================================================
 
 function animate(timestamp) {
     if (!isRunning) return;
@@ -393,10 +327,6 @@ function animate(timestamp) {
     }
 }
 
-// ============================================================
-// SIMULATION CONTROLS
-// ============================================================
-
 async function startSimulation() {
     if (ecgData.length === 0) {
         await loadData();
@@ -428,7 +358,6 @@ function resetSimulation() {
     viewOffset = 0;
     isLive = true;
     
-    // Reset UI
     document.getElementById('totalBeats').textContent = '0';
     document.getElementById('normalBeats').textContent = '0';
     document.getElementById('abnormalBeats').textContent = '0';
@@ -437,8 +366,6 @@ function resetSimulation() {
     document.getElementById('falseCount').textContent = '0';
     document.getElementById('currentStatus').textContent = 'Waiting...';
     document.getElementById('currentStatus').className = 'value waiting';
-    document.getElementById('probBar').style.width = '0%';
-    document.getElementById('probText').textContent = 'Abnormal Probability: --';
     document.getElementById('classificationList').innerHTML = '<p class="placeholder-text">No classifications yet. Start the simulation!</p>';
     document.getElementById('falseDetectionList').innerHTML = '<p class="placeholder-text">No false detections yet.</p>';
     document.getElementById('currentTime').textContent = '0:00.000';
@@ -448,24 +375,14 @@ function resetSimulation() {
     
     updateHistoryUI();
     
-    // Clear beat canvas
     beatRenderer.clear();
     beatRenderer.drawGrid();
     
-    // Redraw ECG
     drawECG();
     
     api.control('reset').catch(console.error);
 }
 
-// ============================================================
-// EXPORT FUNCTIONALITY
-// ============================================================
-
-/**
- * Export ECG graph as medical-format image
- * @param {string} format - 'png' or 'jpeg'
- */
 function exportECG(format = 'png') {
     let endSample = isLive ? currentIndex : Math.max(0, currentIndex + Math.round(viewOffset * SAMPLING_RATE));
     let startSample = Math.max(0, endSample - DISPLAY_SAMPLES);
@@ -488,10 +405,6 @@ function exportECG(format = 'png') {
     ecgRenderer.downloadAsImage(exportOptions, filename);
 }
 
-/**
- * Export beat snapshot as image
- * @param {string} format - 'png' or 'jpeg'
- */
 function exportBeatSnapshot(format = 'png') {
     if (!currentBeatWaveform) {
         alert('No beat waveform available. Run the simulation first.');
@@ -507,7 +420,6 @@ function exportBeatSnapshot(format = 'png') {
     link.click();
 }
 
-// Make functions globally accessible
 window.startSimulation = startSimulation;
 window.stopSimulation = stopSimulation;
 window.resetSimulation = resetSimulation;
