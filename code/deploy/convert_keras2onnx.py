@@ -1,10 +1,3 @@
-"""
-Convert Keras LSTM model to ONNX using keras2onnx.
-
-NOTE: keras2onnx is deprecated and may not work with TensorFlow 2.16+.
-This script is provided for reference only. Use convert_to_onnx_standalone.py instead.
-"""
-
 import os
 import sys
 import numpy as np
@@ -31,17 +24,14 @@ def main():
     print("\nModel summary:")
     model.summary()
     
-    # Convert to ONNX using keras2onnx
     print(f"\nConverting to ONNX...")
     onnx_model = keras2onnx.convert_keras(model, model.name)
     
-    # Save ONNX model
     print(f"Saving ONNX model to: {onnx_path}")
     onnx.save_model(onnx_model, onnx_path)
     
     print("ONNX model saved successfully!")
     
-    # Verify ONNX model
     print("\nVerifying ONNX model...")
     import onnxruntime as ort
     
@@ -52,7 +42,6 @@ def main():
     print(f"Input name: {input_name}, shape: {session.get_inputs()[0].shape}")
     print(f"Output name: {output_name}, shape: {session.get_outputs()[0].shape}")
     
-    # Test inference
     sample_input = np.random.randn(1, 188, 1).astype(np.float32)
     result = session.run([output_name], {input_name: sample_input})
     print(f"Test inference successful! Output shape: {result[0].shape}")
