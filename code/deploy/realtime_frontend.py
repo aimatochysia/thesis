@@ -1,38 +1,3 @@
-"""
-ECG Real-Time Classification Frontend
-
-A mini web-based frontend that simulates real-time ECG monitoring and classification.
-Features:
-- Real-time ECG signal visualization with scrollable history
-- Automatic heartbeat detection at R-peaks
-- AI model classification using PyTorch ONNX models (v2/v3/v5/v6)
-- Live classification results display
-- False detection log with clickable navigation
-- Beat waveform snapshot showing exact input to ONNX model
-
-PREPROCESSING (matches training exactly):
-- v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak), single beat classification
-- v6 (Context-Aware): 200 samples per beat (90 before + 110 after R-peak), 7-beat context window
-  - Flatten to (1, 1400) → scale with training scaler → reshape to (1, 7, 200)
-  - Uses record 119 by default (excluded from training for true validation)
-
-DATA SOURCES:
-- All models (v2/v3/v5/v6): Now use 119.csv by default (MIT-BIH record 119)
-  Record 119 was excluded from v6 training, providing true test data for all models
-- --training-data: Use demo_training_signal.csv (deprecated, kept for backward compatibility)
-
-Usage:
-    python realtime_frontend.py              # Uses v3 (LSTM) by default with record 119
-    python realtime_frontend.py --model v2   # Use CNN model with record 119
-    python realtime_frontend.py --model v3   # Use LSTM model with record 119
-    python realtime_frontend.py --model v5   # Use Transformer model with record 119
-    python realtime_frontend.py --model v6   # Use Context-Aware CNN1D (7-beat rolling buffer)
-    
-    All models now use MIT-BIH record 119 by default for consistent testing.
-    Record 119 was excluded from v6 training, providing true validation data.
-    
-    Then open http://localhost:5000 in your browser
-"""
 
 import os
 import sys
@@ -42,7 +7,6 @@ import pandas as pd
 import joblib
 from flask import Flask, render_template_string, jsonify, request
 
-# ONNX Runtime import for cross-platform inference (PyTorch models exported to ONNX)
 try:
     import onnxruntime as ort
     USE_ONNX = True
@@ -51,13 +15,12 @@ except ImportError:
     print("Install ONNXRuntime for ONNX model inference: pip install onnxruntime")
     sys.exit(1)
 
-# Model configurations for v2, v3, v5, v6 PyTorch ONNX models
 MODEL_CONFIGS = {
     'v2': {
         'name': 'CNN (v2)',
         'onnx_file': 'ecg_cnn_v2_pytorch_final.onnx',
         'scaler_file': 'scaler_v2_pytorch.pkl',
-        'input_shape': (1, 1, 188),  # CNN: (batch, channels, length)
+        'input_shape': (1, 1, 188),
         'beat_length': 188,
         'context_aware': False,
     },
@@ -65,7 +28,7 @@ MODEL_CONFIGS = {
         'name': 'LSTM (v3)',
         'onnx_file': 'ecg_lstm_v3_pytorch_final.onnx',
         'scaler_file': 'scaler_v3_pytorch.pkl',
-        'input_shape': (1, 188, 1),  # LSTM: (batch, timesteps, features)
+        'input_shape': (1, 188, 1),
         'beat_length': 188,
         'context_aware': False,
     },
@@ -73,7 +36,7 @@ MODEL_CONFIGS = {
         'name': 'Transformer (v5)',
         'onnx_file': 'ecg_transformer_v5_pytorch_final.onnx',
         'scaler_file': 'scaler_v5_pytorch.pkl',
-        'input_shape': (1, 188, 1),  # Transformer: (batch, timesteps, features)
+        'input_shape': (1, 188, 1),
         'beat_length': 188,
         'context_aware': False,
     },
@@ -81,7 +44,7 @@ MODEL_CONFIGS = {
         'name': 'Context-Aware CNN1D (v6)',
         'onnx_file': 'context_ecg_model.onnx',
         'scaler_file': 'context_ecg_scaler.pkl',
-        'input_shape': (1, 7, 200),  # (batch, channels=7_beats_as_channels, length=200)
+        'input_shape': (1, 7, 200),
         'beat_length': 200,
         'context_aware': True,
         'context_window_size': 7,
@@ -90,73 +53,45 @@ MODEL_CONFIGS = {
     },
 }
 
-# Constants
-BEAT_LENGTH = 188  # Default beat length (v2, v3, v5)
-BEAT_LENGTH_V6 = 200  # v6 beat length
+BEAT_LENGTH = 188
+BEAT_LENGTH_V6 = 200
 PRE_SAMPLES = 70
 POST_SAMPLES = 118
 PRE_SAMPLES_V6 = 90
 POST_SAMPLES_V6 = 110
-CONTEXT_WINDOW_SIZE = 7  # v6: 3 previous + 1 center + 3 subsequent beats
-SAMPLING_RATE = 360  # Hz - MIT-BIH standard sampling rate
-# Beat type classification: 'N' is Normal, anything else is Abnormal
+CONTEXT_WINDOW_SIZE = 7
+SAMPLING_RATE = 360
 NORMAL_BEAT_TYPE = 'N'
 
-# Global state
 app = Flask(__name__)
 ecg_data = None
 annotations = None
 model = None
 scaler = None
-model_config = None  # Current model configuration
+model_config = None
 current_sample = 0
 classification_results = []
 is_running = False
-speed_multiplier = 10  # Speed up simulation (10x faster)
+speed_multiplier = 10
 
-# Rolling beat buffer for v6 context-aware model
-beat_buffer = []  # List of (beat_waveform, beat_type) tuples
+beat_buffer = []
 
 
 def load_data(model_version='v3', use_training_data=False, use_record_119=True):
-    """Load ECG signal, annotations, model, and scaler.
-    
-    Args:
-        model_version: Which model to use ('v2', 'v3', 'v5', 'v6')
-        use_training_data: If True, use demo data from training set (deprecated).
-                          All models now use 119.csv by default.
-        use_record_119: If True (default), use record 119 (excluded from training - true test).
-                       This is now the default for ALL models (v2, v3, v5, v6).
-    
-    Preprocessing (matches training exactly):
-    - v2/v3/v5: 188 samples per beat (70 before + 118 after R-peak)
-    - v6: 200 samples per beat (90 before + 110 after R-peak), 7-beat context window
-    - Normalization: Uses the same scaler trained on training data ONLY
-    
-    NOTE: All models now use MIT-BIH record 119 by default for consistent testing.
-    Record 119 was excluded from v6 training, and using it for all models provides
-    a fair comparison on unseen real ECG data.
-    """
     global ecg_data, annotations, model, scaler, model_config, beat_buffer
     
-    # Reset beat buffer for v6 context-aware model
     beat_buffer = []
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sample_dir = os.path.join(script_dir, 'sample')
     
-    # All models now use record 119 by default (the reserved test record)
-    # This ensures consistent comparison across v2, v3, v5, and v6
     print(f"{MODEL_CONFIGS[model_version]['name']}: Using record 119 (excluded from training) for validation")
     
-    # Choose data source - default is now record 119 for all models
     if use_record_119:
-        # Use MIT-BIH record 119 - excluded from v6 training, provides true test for all models
         signal_path = os.path.join(sample_dir, '119.csv')
         annotation_path = os.path.join(sample_dir, '119annotations.txt')
         print("Using MIT-BIH record 119 (excluded from training - true test data)")
     elif use_training_data:
-        # Use demo data created from training set - deprecated, kept for backward compatibility
         signal_path = os.path.join(sample_dir, 'demo_training_signal.csv')
         annotation_path = os.path.join(sample_dir, 'demo_training_annotations.txt')
         if not os.path.exists(signal_path):
@@ -164,17 +99,14 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
             signal_path = os.path.join(sample_dir, '119.csv')
             annotation_path = os.path.join(sample_dir, '119annotations.txt')
     else:
-        # Fallback to record 119
         signal_path = os.path.join(sample_dir, '119.csv')
         annotation_path = os.path.join(sample_dir, '119annotations.txt')
         print("Using MIT-BIH record 119 (excluded from training - true test data)")
     
-    # Load signal
     df = pd.read_csv(signal_path)
     df.columns = df.columns.str.strip().str.strip("'")
     ecg_data = df['MLII'].values.astype(np.float32)
     
-    # Load annotations
     annotations_list = []
     with open(annotation_path, 'r') as f:
         lines = f.readlines()
@@ -194,7 +126,6 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
                 continue
     annotations = pd.DataFrame(annotations_list)
     
-    # Get model configuration
     if model_version not in MODEL_CONFIGS:
         print(f"Unknown model version '{model_version}'. Using v3 (LSTM) as default.")
         model_version = 'v3'
@@ -202,7 +133,6 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
     model_config = MODEL_CONFIGS[model_version]
     print(f"\nLoading {model_config['name']} model...")
     
-    # Load ONNX model
     onnx_model_path = os.path.join(sample_dir, model_config['onnx_file'])
     if os.path.exists(onnx_model_path):
         print(f"Loading ONNX model from: {onnx_model_path}")
@@ -211,7 +141,6 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
     else:
         raise FileNotFoundError(f"ONNX model not found: {onnx_model_path}")
     
-    # Load scaler
     scaler_path = os.path.join(sample_dir, model_config['scaler_file'])
     if os.path.exists(scaler_path):
         scaler = joblib.load(scaler_path)
@@ -224,17 +153,9 @@ def load_data(model_version='v3', use_training_data=False, use_record_119=True):
 
 
 def extract_beat_v6(signal, r_peak_idx):
-    """Extract beat for v6 context-aware model.
+    start_idx = r_peak_idx - PRE_SAMPLES_V6
+    end_idx = r_peak_idx + POST_SAMPLES_V6
     
-    PREPROCESSING (matches training exactly):
-    - Beat length: 200 samples (90 before R-peak + 110 after R-peak)
-    - This matches the dataset creator: PRE_R_SAMPLES=90, POST_R_SAMPLES=110
-    - Edge cases handled with zero padding
-    """
-    start_idx = r_peak_idx - PRE_SAMPLES_V6  # 90 samples before R-peak
-    end_idx = r_peak_idx + POST_SAMPLES_V6    # 110 samples after R-peak
-    
-    # Handle edge cases with zero padding
     if start_idx < 0:
         pad_before = -start_idx
         beat = np.zeros(BEAT_LENGTH_V6, dtype=np.float32)
@@ -251,27 +172,20 @@ def extract_beat_v6(signal, r_peak_idx):
 
 
 def extract_and_classify_beat(signal, r_peak_idx, beat_type):
-    """Extract beat at R-peak and classify it using PyTorch ONNX model."""
     global beat_buffer
     
-    # Check if using v6 context-aware model
     is_context_aware = model_config.get('context_aware', False)
     
     if is_context_aware:
-        # V6: Extract 200-sample beat and add to rolling buffer
         beat = extract_beat_v6(signal, r_peak_idx)
         raw_beat = beat.copy()
         
-        # Add beat to buffer
         beat_buffer.append((beat, beat_type))
         
-        # Keep only last 7 beats
         if len(beat_buffer) > CONTEXT_WINDOW_SIZE:
             beat_buffer = beat_buffer[-CONTEXT_WINDOW_SIZE:]
         
-        # Need 7 beats for context-aware inference
         if len(beat_buffer) < CONTEXT_WINDOW_SIZE:
-            # Not enough beats yet, return waiting status
             return {
                 'r_peak': r_peak_idx,
                 'beat_type': beat_type,
@@ -284,32 +198,21 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
                 'context_aware': True
             }
         
-        # ===== V6 PREPROCESSING (matches training exactly) =====
-        # 1. Stack 7 beats into context window: (7, 200)
         context_beats = np.stack([b for b, _ in beat_buffer], axis=0)
         
-        # 2. Flatten for scaling: (1, 7*200) = (1, 1400)
-        #    This matches training: X_train_flat = X_train.reshape(n_train, flat_size)
-        flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_V6  # 7 * 200 = 1400
+        flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_V6
         context_flat = context_beats.reshape(1, flat_size)
         
-        # 3. Normalize using scaler (fitted on training data ONLY)
-        #    This matches training: scaler.fit_transform(X_train_flat)
         normalized = scaler.transform(context_flat).astype(np.float32)
         
-        # 4. Reshape back to (1, 7, 200) for model input
-        #    This matches training: X_train_norm.reshape(-1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH)
         context_input = normalized.reshape(1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH_V6)
         
-        # Center beat info (index 3 in window of 7: positions 0,1,2,3,4,5,6)
         center_beat_type = beat_buffer[3][1]
         
     else:
-        # V2, V3, V5: Single beat classification (188 samples)
         start_idx = r_peak_idx - PRE_SAMPLES
         end_idx = r_peak_idx + POST_SAMPLES
         
-        # Handle edge cases
         if start_idx < 0:
             pad_before = -start_idx
             beat = np.zeros(BEAT_LENGTH, dtype=np.float32)
@@ -324,54 +227,43 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
         
         raw_beat = beat.copy()
         
-        # Normalize using the scaler (fitted only on training data)
         beat_2d = beat.reshape(1, -1)
         normalized = scaler.transform(beat_2d).flatten().astype(np.float32)
         
-        # Reshape for the specific model architecture
         input_shape = model_config['input_shape']
         context_input = normalized.reshape(input_shape)
         center_beat_type = beat_type
     
-    # ONNX model inference
     input_name = model.get_inputs()[0].name
     output_name = model.get_outputs()[0].name
     output = model.run([output_name], {input_name: context_input})[0]
     
-    # Handle output - PyTorch models output raw logits, apply softmax
-    # Output: 0 = Normal, 1 = Abnormal
     if output.shape[1] == 2:
-        # Check if output looks like logits (any value outside [0,1] range or values don't sum to 1)
         needs_softmax = (np.min(output) < 0 or np.max(output) > 1 or 
                          abs(np.sum(output[0]) - 1.0) > 0.01)
         if needs_softmax:
-            # Apply softmax to convert logits to probabilities
             exp_output = np.exp(output - np.max(output, axis=1, keepdims=True))
             proba = exp_output / np.sum(exp_output, axis=1, keepdims=True)
         else:
             proba = output
         prob_abnormal = float(proba[0, 1])
     else:
-        # Single output, assume sigmoid was applied
         prob_abnormal = float(output[0, 0])
     
-    # Clamp probability to [0, 1] range
     prob_abnormal = max(0.0, min(1.0, prob_abnormal))
     
     predicted_class = 1 if prob_abnormal >= 0.5 else 0
     predicted_label = "ABNORMAL" if predicted_class == 1 else "NORMAL"
     
-    # Get ground truth: 'N' is Normal, anything else is Abnormal
     if center_beat_type == NORMAL_BEAT_TYPE:
         ground_truth = "NORMAL"
     else:
         ground_truth = "ABNORMAL"
     
-    # Include R-peak position in beat waveform for accurate marker placement
     if is_context_aware:
-        r_peak_pos_in_beat = PRE_SAMPLES_V6  # R-peak is at sample 90 for v6
+        r_peak_pos_in_beat = PRE_SAMPLES_V6
     else:
-        r_peak_pos_in_beat = PRE_SAMPLES  # R-peak is at sample 70 for v2/v3/v5
+        r_peak_pos_in_beat = PRE_SAMPLES
     
     result = {
         'r_peak': r_peak_idx,
@@ -380,8 +272,8 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
         'predicted': predicted_label,
         'probability': round(prob_abnormal, 4),
         'correct': ground_truth == predicted_label,
-        'beat_waveform': raw_beat.tolist(),  # Include raw beat for visualization
-        'r_peak_pos_in_beat': r_peak_pos_in_beat,  # Position of R-peak in beat waveform
+        'beat_waveform': raw_beat.tolist(),
+        'r_peak_pos_in_beat': r_peak_pos_in_beat,
         'beat_length': BEAT_LENGTH_V6 if is_context_aware else BEAT_LENGTH
     }
     
@@ -392,7 +284,6 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     return result
 
 
-# HTML Template with embedded JavaScript for real-time visualization
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -640,7 +531,7 @@ HTML_TEMPLATE = '''
 </head>
 <body>
     <div class="container">
-        <h1>🫀 ECG Real-Time Classification Monitor</h1>
+        <h1>ECG Real-Time Classification Monitor</h1>
         <p style="text-align: center; color: #888; margin-bottom: 15px;">
             Using PyTorch ONNX Model: <span id="modelName" class="model-badge">Loading...</span>
         </p>
@@ -710,7 +601,7 @@ HTML_TEMPLATE = '''
         
         <!-- Beat Snapshot Panel - Shows the current beat segment sent to ONNX model -->
         <div class="beat-snapshot-container" style="background: rgba(0, 0, 0, 0.3); border-radius: 15px; padding: 20px; margin-bottom: 20px; border: 1px solid rgba(0, 255, 136, 0.3);">
-            <h3 style="color: #00ff88; margin-bottom: 15px; border-bottom: 1px solid rgba(0, 255, 136, 0.3); padding-bottom: 10px;">💓 Current Beat Snapshot (Input to ONNX Model)</h3>
+            <h3 style="color: #00ff88; margin-bottom: 15px; border-bottom: 1px solid rgba(0, 255, 136, 0.3); padding-bottom: 10px;">Current Beat Snapshot (Input to ONNX Model)</h3>
             <div style="display: flex; align-items: center; gap: 20px;">
                 <div style="flex: 1;">
                     <canvas id="beatCanvas" style="width: 100%; height: 150px; background: #0a0a1a; border-radius: 10px;"></canvas>
@@ -731,19 +622,19 @@ HTML_TEMPLATE = '''
         
         <div class="results-container">
             <div class="panel">
-                <h3>📊 Current Classification</h3>
+                <h3>Current Classification</h3>
                 <div class="current-beat">
                     <div class="label">Latest Heartbeat Status</div>
                     <div class="value" id="currentStatus">Waiting...</div>
                     <div class="probability-bar">
-                        <div class="probability-fill" id="probBar" style="width: 0%; background: #00ff88;"></div>
+                        <div class="probability-fill" id="probBar" style="width: 0%; background: #00ff88; display: none;"></div>
                     </div>
-                    <div id="probText" style="margin-top: 10px; color: #888;">Abnormal Probability: --</div>
+                    <div id="probText" style="margin-top: 10px; display: none; color: #888;">Abnormal Probability: --</div>
                 </div>
             </div>
             
             <div class="panel">
-                <h3>📋 Classification History</h3>
+                <h3>Classification History</h3>
                 <div class="classification-list" id="classificationList">
                     <p style="color: #888; text-align: center;">No classifications yet. Start the simulation!</p>
                 </div>
@@ -2201,13 +2092,11 @@ HTML_TEMPLATE = '''
 
 @app.route('/')
 def index():
-    """Serve the main page."""
     return render_template_string(HTML_TEMPLATE)
 
 
 @app.route('/api/data')
 def get_data():
-    """Return ECG signal and annotations as JSON."""
     return jsonify({
         'signal': ecg_data.tolist(),
         'annotations': annotations.to_dict('records')
@@ -2216,7 +2105,6 @@ def get_data():
 
 @app.route('/api/classify', methods=['POST'])
 def classify():
-    """Classify a single beat."""
     data = request.json
     r_peak = data['r_peak']
     beat_type = data['beat_type']
@@ -2227,7 +2115,6 @@ def classify():
 
 @app.route('/api/model_info')
 def get_model_info():
-    """Return current model information."""
     return jsonify({
         'name': model_config['name'],
         'onnx_file': model_config['onnx_file'],
@@ -2236,8 +2123,6 @@ def get_model_info():
 
 
 def main():
-    """Run the real-time frontend."""
-    # Parse command-line arguments
     parser = argparse.ArgumentParser(description='ECG Real-Time Classification Frontend')
     parser.add_argument('--model', '-m', type=str, default='v3', choices=['v2', 'v3', 'v5', 'v6'],
                         help='Model version to use: v2 (CNN), v3 (LSTM), v5 (Transformer), v6 (Context-Aware CNN1D). Default: v3')
@@ -2261,8 +2146,6 @@ def main():
     else:
         print(f"  Single-beat classification: 188 samples (70 before + 118 after R-peak)")
     
-    # All models now use record 119 by default
-    # --training-data flag allows falling back to demo data (deprecated)
     use_record_119 = not args.training_data
     use_training_data = args.training_data
     
