@@ -1,13 +1,8 @@
-"""
-Simple conversion script that saves as SavedModel and converts to ONNX.
-"""
-
 import os
 import sys
 import subprocess
 import numpy as np
 
-# Use TensorFlow with eager execution disabled to avoid compatibility issues
 os.environ['TF_ENABLE_EAGER_CLIENT_STREAMING_ENQUEUE'] = '0'
 
 import tensorflow as tf
@@ -26,12 +21,10 @@ def main():
     print("\nModel summary:")
     model.summary()
     
-    # Save as SavedModel
     print(f"\nSaving as SavedModel to: {saved_model_dir}")
     tf.saved_model.save(model, saved_model_dir)
     print("SavedModel saved successfully!")
     
-    # Convert to ONNX using command line
     print(f"\nConverting to ONNX...")
     cmd = [
         sys.executable, '-m', 'tf2onnx.convert',
@@ -52,7 +45,6 @@ def main():
         print(f"stderr: {e.stderr}")
         sys.exit(1)
     
-    # Verify ONNX model
     print("\nVerifying ONNX model...")
     import onnxruntime as ort
     
@@ -63,7 +55,6 @@ def main():
     print(f"Input name: {input_name}, shape: {session.get_inputs()[0].shape}")
     print(f"Output name: {output_name}, shape: {session.get_outputs()[0].shape}")
     
-    # Test inference
     sample_input = np.random.randn(1, 188, 1).astype(np.float32)
     result = session.run([output_name], {input_name: sample_input})
     print(f"Test inference successful! Output shape: {result[0].shape}")

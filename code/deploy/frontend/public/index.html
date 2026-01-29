@@ -8,12 +8,11 @@
 </head>
 <body>
     <div class="container">
-        <h1>🫀 ECG Real-Time Classification Monitor</h1>
+        <h1>ECG Real-Time Classification Monitor</h1>
         <p class="subtitle">
             Using PyTorch ONNX Model: <span id="modelName" class="model-badge">Loading...</span>
         </p>
         
-        <!-- Controls -->
         <div class="controls">
             <button id="startBtn" class="btn btn-start" onclick="startSimulation()">▶ Start</button>
             <button id="stopBtn" class="btn btn-stop" onclick="stopSimulation()">⏹ Stop</button>
@@ -29,7 +28,6 @@
             </div>
         </div>
         
-        <!-- Stats Bar -->
         <div class="stats-bar">
             <div class="stat-item">
                 <div class="stat-value" id="totalBeats">0</div>
@@ -57,7 +55,6 @@
             </div>
         </div>
         
-        <!-- ECG Graph Container -->
         <div class="ecg-container">
             <canvas id="ecgCanvas"></canvas>
             <div class="time-display">
@@ -77,9 +74,8 @@
             <p class="drag-hint">💡 Drag the graph to scroll through history</p>
         </div>
         
-        <!-- Beat Snapshot Container -->
         <div class="beat-snapshot-container">
-            <h3 class="section-title">💓 Current Beat Snapshot (Input to ONNX Model)</h3>
+            <h3 class="section-title">Current Beat Snapshot (Input to ONNX Model)</h3>
             <div class="beat-snapshot-content">
                 <div class="beat-canvas-wrapper">
                     <canvas id="beatCanvas"></canvas>
@@ -106,19 +102,15 @@
         
         <div class="results-container">
             <div class="panel">
-                <h3>📊 Current Classification</h3>
+                <h3>Current Classification</h3>
                 <div class="current-beat">
                     <div class="label">Latest Heartbeat Status</div>
                     <div class="value" id="currentStatus">Waiting...</div>
-                    <div class="probability-bar">
-                        <div class="probability-fill" id="probBar"></div>
-                    </div>
-                    <div id="probText" class="prob-text">Abnormal Probability: --</div>
                 </div>
             </div>
             
             <div class="panel">
-                <h3>📋 Classification History</h3>
+                <h3>Classification History</h3>
                 <div class="classification-list" id="classificationList">
                     <p class="placeholder-text">No classifications yet. Start the simulation!</p>
                 </div>
