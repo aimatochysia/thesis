@@ -4,7 +4,7 @@
 
 > **FOKUS UTAMA PENELITIAN:**
 > 1. **Pra-Pemrosesan Data (Pre-processing)** - Bagaimana data dipersiapkan secara sistematis
-> 2. **Simulasi Deployment Real-time** - Validasi model pada kondisi nyata dengan penurunan akurasi ~5%
+> 2. **Simulasi Deployment Real-time** - Validasi model pada kondisi nyata dengan penurunan akurasi ~4%
 > 3. Model 1D-CNN (pendukung, karena topik ini sudah banyak diteliti)
 
 ---
@@ -21,7 +21,7 @@ Penyakit kardiovaskular merupakan **penyebab utama kematian** di seluruh dunia. 
 1. **Membutuhkan keahlian tinggi** - Hanya kardiolog berpengalaman yang dapat menginterpretasikan sinyal ECG dengan akurat
 2. **Rentan terhadap noise/gangguan** - Sinyal ECG sering terkontaminasi oleh berbagai sumber gangguan
 3. **Sifat acak aritmia** - Aritmia dapat muncul sewaktu-waktu dan sulit diprediksi kemunculannya
-4. **Resiko misdiagnosis** - Dapat menyebabkan keterlambatan intervensi medis yang krusial
+4. **Risiko misdiagnosis** - Dapat menyebabkan keterlambatan intervensi medis yang krusial
 
 ### Solusi yang Ditawarkan
 
@@ -564,7 +564,7 @@ def predict(context_window):
 |--------|-------------------|------------------------------|---------|
 | **Akurasi** | 98% | 94% | **-4%** |
 
-### Analisis Penurunan 5% Akurasi:
+### Analisis Penurunan 4% Akurasi:
 
 1. **Distribution Shift**
    - Morfologi sinyal ECG **berbeda antar pasien**
