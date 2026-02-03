@@ -2006,7 +2006,7 @@ HTML_TEMPLATE = '''
             updateBatchStatus();
         }
         
-        function resetSimulation() {
+        async function resetSimulation() {
             stopSimulation();
             currentIndex = 0;
             classifications = [];
@@ -2027,6 +2027,13 @@ HTML_TEMPLATE = '''
             
             // Reset graph height tracking
             maxGraphHeight = MIN_GRAPH_HEIGHT;
+            
+            // Reset backend state (clears beat_buffer for context-aware models)
+            try {
+                await fetch('/api/reset', { method: 'POST' });
+            } catch (e) {
+                console.error('Failed to reset backend:', e);
+            }
             
             // Reset batch state
             savedBatches = [];
@@ -2119,6 +2126,16 @@ def get_model_info():
         'name': model_config['name'],
         'onnx_file': model_config['onnx_file'],
         'scaler_file': model_config['scaler_file'],
+    })
+
+
+@app.route('/api/reset', methods=['POST'])
+def reset_backend():
+    global beat_buffer
+    beat_buffer = []
+    return jsonify({
+        'status': 'ok',
+        'message': 'Backend state reset (beat_buffer cleared)'
     })
 
 
