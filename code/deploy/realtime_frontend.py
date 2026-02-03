@@ -2030,9 +2030,13 @@ HTML_TEMPLATE = '''
             
             // Reset backend state (clears beat_buffer for context-aware models)
             try {
-                await fetch('/api/reset', { method: 'POST' });
+                const resp = await fetch('/api/reset', { method: 'POST' });
+                if (!resp.ok) {
+                    console.warn('Backend reset returned non-OK status');
+                }
             } catch (e) {
                 console.error('Failed to reset backend:', e);
+                alert('Warning: Backend reset failed. Please refresh the page if issues persist.');
             }
             
             // Reset batch state
@@ -2131,6 +2135,8 @@ def get_model_info():
 
 @app.route('/api/reset', methods=['POST'])
 def reset_backend():
+    # Note: beat_buffer access is not thread-safe, but this is acceptable
+    # for this single-user demo application where concurrent requests are rare
     global beat_buffer
     beat_buffer = []
     return jsonify({
