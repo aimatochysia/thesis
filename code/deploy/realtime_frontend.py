@@ -178,9 +178,9 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     
     if is_context_aware:
         beat = extract_beat_v6(signal, r_peak_idx)
-        raw_beat = beat.copy()
         
-        beat_buffer.append((beat, beat_type))
+        # store beat, beat_type, and r_peak_idx in buffer
+        beat_buffer.append((beat, beat_type, r_peak_idx))
         
         if len(beat_buffer) > CONTEXT_WINDOW_SIZE:
             beat_buffer = beat_buffer[-CONTEXT_WINDOW_SIZE:]
@@ -193,12 +193,17 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
                 'predicted': "WAITING",
                 'probability': 0.0,
                 'correct': None,
-                'beat_waveform': raw_beat.tolist(),
+                'beat_waveform': beat.tolist(),
                 'buffer_size': len(beat_buffer),
                 'context_aware': True
             }
         
-        context_beats = np.stack([b for b, _ in beat_buffer], axis=0)
+        # get the CENTER beat (index 3) which is the one being classified
+        center_beat = beat_buffer[3][0]
+        center_beat_type = beat_buffer[3][1]
+        center_r_peak = beat_buffer[3][2]
+        
+        context_beats = np.stack([b for b, _, _ in beat_buffer], axis=0)
         
         flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_V6
         context_flat = context_beats.reshape(1, flat_size)
@@ -206,8 +211,6 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
         normalized = scaler.transform(context_flat).astype(np.float32)
         
         context_input = normalized.reshape(1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH_V6)
-        
-        center_beat_type = beat_buffer[3][1]
         
     else:
         start_idx = r_peak_idx - PRE_SAMPLES
@@ -262,17 +265,21 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     
     if is_context_aware:
         r_peak_pos_in_beat = PRE_SAMPLES_V6
+        beat_waveform_to_return = center_beat.tolist()
+        r_peak_to_return = center_r_peak
     else:
         r_peak_pos_in_beat = PRE_SAMPLES
+        beat_waveform_to_return = raw_beat.tolist()
+        r_peak_to_return = r_peak_idx
     
     result = {
-        'r_peak': r_peak_idx,
+        'r_peak': r_peak_to_return,
         'beat_type': center_beat_type,
         'ground_truth': ground_truth,
         'predicted': predicted_label,
         'probability': round(prob_abnormal, 4),
         'correct': ground_truth == predicted_label,
-        'beat_waveform': raw_beat.tolist(),
+        'beat_waveform': beat_waveform_to_return,
         'r_peak_pos_in_beat': r_peak_pos_in_beat,
         'beat_length': BEAT_LENGTH_V6 if is_context_aware else BEAT_LENGTH
     }
@@ -2006,7 +2013,7 @@ HTML_TEMPLATE = '''
             updateBatchStatus();
         }
         
-        function resetSimulation() {
+        async function resetSimulation() {
             stopSimulation();
             currentIndex = 0;
             classifications = [];
@@ -2027,6 +2034,17 @@ HTML_TEMPLATE = '''
             
             // Reset graph height tracking
             maxGraphHeight = MIN_GRAPH_HEIGHT;
+            
+            // Reset backend state (clears beat_buffer for context-aware models)
+            try {
+                const resp = await fetch('/api/reset', { method: 'POST' });
+                if (!resp.ok) {
+                    console.warn('Backend reset returned non-OK status');
+                }
+            } catch (e) {
+                console.error('Failed to reset backend:', e);
+                alert('Warning: Backend reset failed. Please refresh the page if issues persist.');
+            }
             
             // Reset batch state
             savedBatches = [];
@@ -2119,6 +2137,18 @@ def get_model_info():
         'name': model_config['name'],
         'onnx_file': model_config['onnx_file'],
         'scaler_file': model_config['scaler_file'],
+    })
+
+
+@app.route('/api/reset', methods=['POST'])
+def reset_backend():
+    # Note: beat_buffer access is not thread-safe, but this is acceptable
+    # for this single-user demo application where concurrent requests are rare
+    global beat_buffer
+    beat_buffer = []
+    return jsonify({
+        'status': 'ok',
+        'message': 'Backend state reset (beat_buffer cleared)'
     })
 
 
