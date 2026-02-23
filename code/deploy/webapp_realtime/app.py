@@ -62,6 +62,8 @@ MODEL_CONFIGS = {
 
 BEAT_LENGTH = 188
 BEAT_LENGTH_V6 = 200
+PRE_SAMPLES = 70
+POST_SAMPLES = 118
 PRE_SAMPLES_V6 = 90
 POST_SAMPLES_V6 = 110
 CONTEXT_WINDOW_SIZE = 7
@@ -430,7 +432,7 @@ def process_ecg(signal, fs):
         last_r = r_idx
 
         if is_context:
-            beat = extract_beat_v6(filtered, r_idx)
+            beat = extract_beat_v6(signal, r_idx)
             beat_buffer.append(beat)
             if len(beat_buffer) > CONTEXT_WINDOW_SIZE:
                 beat_buffer = beat_buffer[-CONTEXT_WINDOW_SIZE:]
@@ -468,11 +470,25 @@ def process_ecg(signal, fs):
                 'context_aware': True,
             })
         else:
-            start, end = segmenter.compute_window(r_idx, total_len=len(filtered))
-            window = filtered[start:end]
-            beat_188 = resample_linear(window, beat_length)
+            pre_samples = PRE_SAMPLES
+            post_samples = POST_SAMPLES
+            start_idx = r_idx - pre_samples
+            end_idx = r_idx + post_samples
 
-            prob = classify_beat_single(beat_188, input_shape)
+            if start_idx < 0:
+                pad_before = -start_idx
+                beat = np.zeros(beat_length, dtype=np.float32)
+                available = signal[:end_idx]
+                beat[pad_before:pad_before + len(available)] = available
+            elif end_idx > len(signal):
+                beat = np.zeros(beat_length, dtype=np.float32)
+                available = signal[start_idx:]
+                beat[:len(available)] = available
+            else:
+                beat = signal[start_idx:end_idx].astype(np.float32)
+
+            raw_beat = beat.copy()
+            prob = classify_beat_single(beat, input_shape)
             pred_label = "ABNORMAL" if prob >= 0.5 else "NORMAL"
 
             results.append({
@@ -481,10 +497,10 @@ def process_ecg(signal, fs):
                 'time_sec': round(r_idx / fs, 4),
                 'predicted': pred_label,
                 'probability': round(prob, 4),
-                'beat_waveform': beat_188.tolist(),
-                'window_start': start,
-                'window_end': end,
-                'r_peak_pos_in_beat': r_idx - start,
+                'beat_waveform': raw_beat.tolist(),
+                'window_start': max(0, start_idx),
+                'window_end': min(len(signal), end_idx),
+                'r_peak_pos_in_beat': pre_samples,
                 'beat_length': beat_length,
             })
 
@@ -530,14 +546,22 @@ def upload_ecg():
         if ecg_column and ecg_column in df.columns:
             signal = df[ecg_column].values
         else:
-            # auto-detect first numeric column
+            # auto-detect: prefer known ECG column names, then first numeric
             signal = None
             detected_col = None
-            for col in df.columns:
-                if np.issubdtype(df[col].dtype, np.number):
-                    signal = df[col].values
-                    detected_col = col
+            preferred_names = ['MLII', 'mlii', 'ecg', 'ECG', 'V1', 'v1',
+                               'lead_II', 'lead_ii', 'signal']
+            for pname in preferred_names:
+                if pname in df.columns and np.issubdtype(df[pname].dtype, np.number):
+                    signal = df[pname].values
+                    detected_col = pname
                     break
+            if signal is None:
+                for col in df.columns:
+                    if np.issubdtype(df[col].dtype, np.number):
+                        signal = df[col].values
+                        detected_col = col
+                        break
             if signal is None:
                 return jsonify({'error': 'No numeric column found in CSV'}), 400
             ecg_column = detected_col
