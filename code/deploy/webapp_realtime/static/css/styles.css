@@ -1,0 +1,328 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    color: #fff;
+    min-height: 100vh;
+    padding: 20px;
+}
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+}
+h1 {
+    text-align: center;
+    margin-bottom: 20px;
+    color: #00ff88;
+    text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
+}
+button {
+    padding: 12px 30px;
+    font-size: 16px;
+    border: none;
+    border-radius: 25px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    font-weight: bold;
+}
+button:hover {
+    transform: scale(1.05);
+    box-shadow: 0 5px 20px rgba(0, 0, 0, 0.3);
+}
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* Upload section */
+.upload-section {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 15px;
+    padding: 20px;
+    margin-bottom: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.upload-row {
+    display: flex;
+    gap: 20px;
+    align-items: stretch;
+}
+.upload-area {
+    flex: 1;
+    border: 2px dashed rgba(0, 255, 136, 0.4);
+    border-radius: 15px;
+    padding: 40px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 180px;
+}
+.upload-area:hover {
+    border-color: #00ff88;
+    background: rgba(0, 255, 136, 0.05);
+}
+.upload-area.dragover {
+    border-color: #00ff88;
+    background: rgba(0, 255, 136, 0.1);
+}
+.upload-icon {
+    font-size: 36px;
+    color: #00ff88;
+    margin-bottom: 10px;
+    font-weight: bold;
+    font-family: 'Courier New', monospace;
+}
+.upload-filename {
+    font-size: 18px;
+    font-weight: bold;
+    color: #00ff88;
+    margin-bottom: 5px;
+}
+.upload-options {
+    min-width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.option-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.option-group label {
+    font-size: 12px;
+    color: #888;
+    text-transform: uppercase;
+}
+.option-group input,
+.option-group select {
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(0, 0, 0, 0.3);
+    color: #fff;
+    font-size: 14px;
+}
+.option-group select {
+    cursor: pointer;
+}
+.option-group select option {
+    background: #1a1a2e;
+    color: #fff;
+}
+#processBtn {
+    background: linear-gradient(45deg, #00ff88, #00cc6a);
+    color: #1a1a2e;
+    margin-top: auto;
+}
+
+/* Stats bar */
+.stats-bar {
+    display: flex;
+    justify-content: space-around;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 15px;
+    border-radius: 15px;
+    margin-bottom: 20px;
+}
+.stat-item {
+    text-align: center;
+}
+.stat-value {
+    font-size: 28px;
+    font-weight: bold;
+    color: #00ff88;
+}
+.stat-label {
+    font-size: 12px;
+    color: #888;
+    text-transform: uppercase;
+}
+
+/* ECG container */
+.ecg-container {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 15px;
+    padding: 20px;
+    margin-bottom: 20px;
+    border: 1px solid rgba(0, 255, 136, 0.3);
+}
+#ecgCanvas {
+    width: 100%;
+    min-height: 300px;
+    height: 300px;
+    background: #0a0a1a;
+    border-radius: 10px;
+}
+.time-display {
+    text-align: center;
+    font-size: 20px;
+    color: #00ff88;
+    margin-top: 10px;
+    font-family: 'Courier New', monospace;
+}
+
+/* Navigation and download buttons */
+.nav-btn {
+    padding: 5px 15px;
+    font-size: 12px;
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #fff;
+    cursor: pointer;
+}
+.download-btn {
+    padding: 5px 15px;
+    font-size: 12px;
+    border-radius: 15px;
+    background: rgba(0, 255, 136, 0.1);
+    border: 1px solid rgba(0, 255, 136, 0.3);
+    color: #00ff88;
+    cursor: pointer;
+}
+
+/* Beat snapshot container */
+.beat-snapshot-container {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 15px;
+    padding: 20px;
+    margin-bottom: 20px;
+    border: 1px solid rgba(0, 255, 136, 0.3);
+}
+.beat-snapshot-container h3 {
+    color: #00ff88;
+    margin-bottom: 15px;
+    border-bottom: 1px solid rgba(0, 255, 136, 0.3);
+    padding-bottom: 10px;
+}
+
+/* Results */
+.results-container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+.panel {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 15px;
+    padding: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.panel h3 {
+    margin-bottom: 15px;
+    color: #00ff88;
+    border-bottom: 1px solid rgba(0, 255, 136, 0.3);
+    padding-bottom: 10px;
+}
+.classification-list {
+    max-height: 400px;
+    overflow-y: auto;
+}
+.classification-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px;
+    margin-bottom: 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+.classification-item:hover {
+    filter: brightness(1.2);
+}
+.classification-item.normal {
+    background: rgba(0, 255, 136, 0.15);
+    border-left: 4px solid #00ff88;
+}
+.classification-item.abnormal {
+    background: rgba(255, 71, 87, 0.15);
+    border-left: 4px solid #ff4757;
+}
+.classification-item.waiting {
+    background: rgba(255, 215, 0, 0.15);
+    border-left: 4px solid #ffd700;
+}
+.beat-info {
+    font-size: 14px;
+}
+.beat-time {
+    color: #888;
+    font-size: 12px;
+}
+.prediction-badge {
+    padding: 5px 15px;
+    border-radius: 15px;
+    font-size: 12px;
+    font-weight: bold;
+}
+.prediction-badge.normal {
+    background: #00ff88;
+    color: #1a1a2e;
+}
+.prediction-badge.abnormal {
+    background: #ff4757;
+    color: white;
+}
+.prediction-badge.waiting {
+    background: #ffd700;
+    color: #1a1a2e;
+}
+
+/* Current beat / summary */
+.current-beat {
+    text-align: center;
+    padding: 20px;
+}
+.probability-bar {
+    height: 20px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.probability-fill {
+    height: 100%;
+    border-radius: 10px;
+    transition: width 0.3s ease;
+}
+
+/* Model badge */
+.model-badge {
+    background: linear-gradient(45deg, #00ff88, #00cc6a);
+    color: #1a1a2e;
+    padding: 5px 15px;
+    border-radius: 15px;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+/* Scrollbar styling */
+.classification-list::-webkit-scrollbar {
+    width: 6px;
+}
+.classification-list::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 3px;
+}
+.classification-list::-webkit-scrollbar-thumb {
+    background: rgba(0, 255, 136, 0.3);
+    border-radius: 3px;
+}
+
+@media (max-width: 900px) {
+    .upload-row {
+        flex-direction: column;
+    }
+    .results-container {
+        grid-template-columns: 1fr;
+    }
+}
