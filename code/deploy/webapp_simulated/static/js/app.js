@@ -791,13 +791,13 @@ function drawBeatWaveform(waveform, isAbnormal) {
     // Draw grid
     beatCtx.strokeStyle = 'rgba(0, 255, 136, 0.1)';
     beatCtx.lineWidth = 1;
-    for (var gx = 0; gx < width; gx += 30) {
+    for (var gx = 0; gx < width; gx += BATCH_GRID_SPACING) {
         beatCtx.beginPath();
         beatCtx.moveTo(gx, 0);
         beatCtx.lineTo(gx, height);
         beatCtx.stroke();
     }
-    for (var gy = 0; gy < height; gy += 30) {
+    for (var gy = 0; gy < height; gy += BATCH_GRID_SPACING) {
         beatCtx.beginPath();
         beatCtx.moveTo(0, gy);
         beatCtx.lineTo(width, gy);
