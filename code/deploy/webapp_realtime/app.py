@@ -262,11 +262,12 @@ processing_results = None
 model_session = None
 model_scaler = None
 active_model_config = None
+active_model_version = None
 beat_buffer = []
 
 
 def load_model(model_version='v3'):
-    global model_session, model_scaler, active_model_config, beat_buffer
+    global model_session, model_scaler, active_model_config, beat_buffer, active_model_version
 
     beat_buffer = []
 
@@ -275,6 +276,7 @@ def load_model(model_version='v3'):
         model_version = 'v3'
 
     active_model_config = MODEL_CONFIGS[model_version]
+    active_model_version = model_version
     script_dir = os.path.dirname(os.path.abspath(__file__))
     sample_dir = os.path.join(script_dir, '..', 'sample')
 
@@ -572,9 +574,7 @@ def process():
     data = request.get_json(silent=True) or {}
     model_version = data.get('model_version', None)
 
-    if model_version and model_version != list(MODEL_CONFIGS.keys())[
-        list(MODEL_CONFIGS.values()).index(active_model_config)
-    ]:
+    if model_version and model_version != active_model_version:
         try:
             load_model(model_version)
         except Exception as e:

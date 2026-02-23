@@ -17,6 +17,9 @@ var totalSamples = 0;
 var viewStartSec = 0;
 var viewWindowSec = 5;
 
+var GRID_SPACING = 30;
+var BEAT_GRID_SPACING = 20;
+
 // Drag state
 var isDragging = false;
 var lastDragX = 0;
@@ -391,13 +394,13 @@ function drawECG() {
     // Grid lines
     ecgCtx.strokeStyle = 'rgba(0, 255, 136, 0.07)';
     ecgCtx.lineWidth = 0.5;
-    for (var gx = 0; gx < w; gx += 30) {
+    for (var gx = 0; gx < w; gx += GRID_SPACING) {
         ecgCtx.beginPath();
         ecgCtx.moveTo(gx, 0);
         ecgCtx.lineTo(gx, h);
         ecgCtx.stroke();
     }
-    for (var gy = 0; gy < h; gy += 30) {
+    for (var gy = 0; gy < h; gy += GRID_SPACING) {
         ecgCtx.beginPath();
         ecgCtx.moveTo(0, gy);
         ecgCtx.lineTo(w, gy);
@@ -510,13 +513,13 @@ function drawBeatWaveform(beat) {
     // Grid
     beatCtx.strokeStyle = 'rgba(0, 255, 136, 0.07)';
     beatCtx.lineWidth = 0.5;
-    for (var gx = 0; gx < w; gx += 20) {
+    for (var gx = 0; gx < w; gx += BEAT_GRID_SPACING) {
         beatCtx.beginPath();
         beatCtx.moveTo(gx, 0);
         beatCtx.lineTo(gx, h);
         beatCtx.stroke();
     }
-    for (var gy = 0; gy < h; gy += 20) {
+    for (var gy = 0; gy < h; gy += BEAT_GRID_SPACING) {
         beatCtx.beginPath();
         beatCtx.moveTo(0, gy);
         beatCtx.lineTo(w, gy);
