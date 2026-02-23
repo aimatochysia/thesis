@@ -189,20 +189,10 @@ function processECG() {
 
     document.getElementById('processingIndicator').style.display = 'block';
 
-    var modelVersion = document.getElementById('modelSelect').value;
-
-    // Change model if needed
-    fetch('/api/change_model', {
+    fetch('/api/process', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({model_version: modelVersion})
-    })
-    .then(function() {
-        return fetch('/api/process', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({model_version: modelVersion})
-        });
+        body: JSON.stringify({})
     })
     .then(function(r) { return r.json(); })
     .then(function(data) {

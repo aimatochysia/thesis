@@ -1,14 +1,15 @@
 # ECG Real-Time Classification Web Application (Simulated)
 
 A Flask-based web application for real-time ECG heartbeat classification using
-PyTorch ONNX models. This app simulates real-time ECG monitoring by playing back
-recorded MIT-BIH data through a browser-based interface with live classification.
+the Context-Aware CNN1D (v6) PyTorch ONNX model. This app simulates real-time
+ECG monitoring by playing back recorded MIT-BIH data through a browser-based
+interface with live classification.
 
 ## Features
 
 - Real-time ECG signal visualization with interactive canvas
-- Beat-by-beat classification using ONNX inference (Normal vs Abnormal)
-- Multiple model support (CNN, LSTM, Transformer, Context-Aware CNN1D)
+- Beat-by-beat classification using Context-Aware CNN1D (v6) ONNX inference
+- 7-beat rolling context window for improved accuracy
 - Adjustable playback speed (0.1x to 10x)
 - History navigation with drag-to-scroll
 - Auto-batch export system with ZIP download
@@ -26,14 +27,8 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-# Run with default model (v3 - LSTM)
+# Run the application
 python app.py
-
-# Run with a specific model
-python app.py --model v2    # CNN
-python app.py --model v3    # LSTM (default)
-python app.py --model v5    # Transformer
-python app.py --model v6    # Context-Aware CNN1D
 
 # Run on a custom port
 python app.py --port 8080
@@ -41,14 +36,14 @@ python app.py --port 8080
 
 Then open your browser to `http://localhost:5000` (or the specified port).
 
-## Available Models
+## Model
 
-| Version | Architecture         | Beat Length | Notes                              |
-|---------|----------------------|-------------|-------------------------------------|
-| v2      | CNN                  | 188         | Single-beat classification          |
-| v3      | LSTM                 | 188         | Single-beat classification (default)|
-| v5      | Transformer          | 188         | Single-beat classification          |
-| v6      | Context-Aware CNN1D  | 200         | Uses 7-beat rolling buffer context  |
+The application uses the Context-Aware CNN1D (v6) model:
+
+- Beat length: 200 samples (90 before + 110 after R-peak)
+- Context window: 7 beats (3 previous + center + 3 next)
+- Input shape: (1, 7, 200) after normalization
+- First 3 beats show WAITING status until the context buffer is full
 
 ## Data
 
@@ -78,4 +73,4 @@ webapp_simulated/
 - `GET /api/data` - Returns the full ECG signal and annotations
 - `POST /api/classify` - Classifies a beat at a given R-peak index
 - `GET /api/model_info` - Returns current model metadata
-- `POST /api/reset` - Resets the backend beat buffer (for context-aware models)
+- `POST /api/reset` - Resets the backend beat buffer
