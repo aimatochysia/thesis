@@ -197,10 +197,11 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
                 'context_aware': True
             }
 
-        # get the CENTER beat (index 3) which is the one being classified
-        center_beat = beat_buffer[3][0]
-        center_beat_type = beat_buffer[3][1]
-        center_r_peak = beat_buffer[3][2]
+        # get the CENTER beat which is the one being classified
+        center_idx = CONTEXT_WINDOW_SIZE // 2
+        center_beat = beat_buffer[center_idx][0]
+        center_beat_type = beat_buffer[center_idx][1]
+        center_r_peak = beat_buffer[center_idx][2]
 
         context_beats = np.stack([b for b, _, _ in beat_buffer], axis=0)
 
@@ -369,6 +370,8 @@ def main():
     print("\nPress Ctrl+C to stop the server")
     print("=" * 60)
 
+    # Note: For production deployment, use a WSGI server like Gunicorn:
+    #   gunicorn -w 1 -b 127.0.0.1:5000 app:app
     app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
 
 
