@@ -265,6 +265,13 @@ def reset_backend():
     })
 
 
+def ensure_loaded():
+    """Load data and model if not already loaded (for gunicorn compatibility)."""
+    if ecg_data is None:
+        print("Loading data and model...")
+        load_data(model_version='context_aware')
+
+
 def main():
     parser = argparse.ArgumentParser(description='ECG Real-Time Classification Frontend')
     parser.add_argument('--port', '-p', type=int, default=5000,
@@ -272,8 +279,6 @@ def main():
     parser.add_argument('--training-data', action='store_true',
                         help='Use demo training data instead of record 119. (Deprecated)')
     args = parser.parse_args()
-
-
 
     print("\nModel: Context-Aware CNN1D ")
 
@@ -285,13 +290,18 @@ def main():
     print("Loading data and model...")
     load_data(model_version='context_aware', use_training_data=use_training_data, use_record_119=use_record_119)
 
+    host = '0.0.0.0' if os.environ.get('DOCKER') else '127.0.0.1'
     print(f"\nStarting web server on port {args.port}...")
     print(f"Open your browser and go to: http://localhost:{args.port}")
     print("\nPress Ctrl+C to stop the server")
     print("=" * 60)
 
-    # gunicorn is reccommended
-    app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
+    app.run(host=host, port=args.port, debug=False, threaded=True)
+
+
+# Load data on module import so gunicorn workers have the model ready.
+# When run directly via `python app.py`, main() will reload with CLI args.
+ensure_loaded()
 
 
 if __name__ == '__main__':
