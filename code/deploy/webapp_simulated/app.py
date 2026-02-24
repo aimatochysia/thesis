@@ -16,8 +16,8 @@ except ImportError:
     sys.exit(1)
 
 MODEL_CONFIGS = {
-    'v6': {
-        'name': 'Context-Aware CNN1D (v6)',
+    'context_aware': {
+        'name': 'Context-Aware CNN1D',
         'onnx_file': 'context_ecg_model.onnx',
         'scaler_file': 'context_ecg_scaler.pkl',
         'input_shape': (1, 7, 200),
@@ -29,9 +29,9 @@ MODEL_CONFIGS = {
     },
 }
 
-BEAT_LENGTH_V6 = 200
-PRE_SAMPLES_V6 = 90
-POST_SAMPLES_V6 = 110
+BEAT_LENGTH_context_aware = 200
+PRE_SAMPLES_context_aware = 90
+POST_SAMPLES_context_aware = 110
 CONTEXT_WINDOW_SIZE = 7
 SAMPLING_RATE = 360
 NORMAL_BEAT_TYPE = 'N'
@@ -50,13 +50,13 @@ speed_multiplier = 10
 beat_buffer = []
 
 
-def load_data(model_version='v6', use_training_data=False, use_record_119=True):
+def load_data(model_version='context_aware', use_training_data=False, use_record_119=True):
     global ecg_data, annotations, model, scaler, model_config, beat_buffer
 
     beat_buffer = []
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    sample_dir = os.path.join(script_dir, '..', 'sample')
+    sample_dir = os.path.join(script_dir, 'model')
 
     print(f"{MODEL_CONFIGS[model_version]['name']}: Using record 119 (excluded from training) for validation")
 
@@ -100,8 +100,8 @@ def load_data(model_version='v6', use_training_data=False, use_record_119=True):
     annotations = pd.DataFrame(annotations_list)
 
     if model_version not in MODEL_CONFIGS:
-        print(f"Unknown model version '{model_version}'. Using v6 (Context-Aware CNN1D) as default.")
-        model_version = 'v6'
+        print(f"Unknown model version '{model_version}'. Using context_aware (Context-Aware CNN1D) as default.")
+        model_version = 'context_aware'
 
     model_config = MODEL_CONFIGS[model_version]
     print(f"\nLoading {model_config['name']} model...")
@@ -121,21 +121,19 @@ def load_data(model_version='v6', use_training_data=False, use_record_119=True):
     else:
         raise FileNotFoundError(f"Scaler not found: {scaler_path}")
 
-    print(f"\nLoaded {len(ecg_data)} ECG samples")
-    print(f"Loaded {len(annotations)} annotations")
 
 
-def extract_beat_v6(signal, r_peak_idx):
-    start_idx = r_peak_idx - PRE_SAMPLES_V6
-    end_idx = r_peak_idx + POST_SAMPLES_V6
+def extract_beat_context_aware(signal, r_peak_idx):
+    start_idx = r_peak_idx - PRE_SAMPLES_context_aware
+    end_idx = r_peak_idx + POST_SAMPLES_context_aware
 
     if start_idx < 0:
         pad_before = -start_idx
-        beat = np.zeros(BEAT_LENGTH_V6, dtype=np.float32)
+        beat = np.zeros(BEAT_LENGTH_context_aware, dtype=np.float32)
         available = signal[:end_idx]
         beat[pad_before:pad_before + len(available)] = available
     elif end_idx > len(signal):
-        beat = np.zeros(BEAT_LENGTH_V6, dtype=np.float32)
+        beat = np.zeros(BEAT_LENGTH_context_aware, dtype=np.float32)
         available = signal[start_idx:]
         beat[:len(available)] = available
     else:
@@ -147,7 +145,7 @@ def extract_beat_v6(signal, r_peak_idx):
 def extract_and_classify_beat(signal, r_peak_idx, beat_type):
     global beat_buffer
 
-    beat = extract_beat_v6(signal, r_peak_idx)
+    beat = extract_beat_context_aware(signal, r_peak_idx)
 
     beat_buffer.append((beat, beat_type, r_peak_idx))
 
@@ -175,12 +173,12 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
 
     context_beats = np.stack([b for b, _, _ in beat_buffer], axis=0)
 
-    flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_V6
+    flat_size = CONTEXT_WINDOW_SIZE * BEAT_LENGTH_context_aware
     context_flat = context_beats.reshape(1, flat_size)
 
     normalized = scaler.transform(context_flat).astype(np.float32)
 
-    context_input = normalized.reshape(1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH_V6)
+    context_input = normalized.reshape(1, CONTEXT_WINDOW_SIZE, BEAT_LENGTH_context_aware)
 
     input_name = model.get_inputs()[0].name
     output_name = model.get_outputs()[0].name
@@ -216,8 +214,8 @@ def extract_and_classify_beat(signal, r_peak_idx, beat_type):
         'probability': round(prob_abnormal, 4),
         'correct': ground_truth == predicted_label,
         'beat_waveform': center_beat.tolist(),
-        'r_peak_pos_in_beat': PRE_SAMPLES_V6,
-        'beat_length': BEAT_LENGTH_V6,
+        'r_peak_pos_in_beat': PRE_SAMPLES_context_aware,
+        'beat_length': BEAT_LENGTH_context_aware,
         'context_aware': True,
         'buffer_size': len(beat_buffer)
     }
@@ -275,16 +273,9 @@ def main():
                         help='Use demo training data instead of record 119. (Deprecated)')
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("ECG Real-Time Classification Frontend")
-    print("Using Context-Aware CNN1D (v6) PyTorch ONNX Model")
-    print("=" * 60)
 
-    print("\nModel: Context-Aware CNN1D (v6)")
-    print("  Uses 7-beat rolling buffer (3 prev + center + 3 next)")
-    print("  Beat extraction: 200 samples (90 before + 110 after R-peak)")
-    print("  Normalization: Flatten 7x200 -> scale -> reshape to (7, 200)")
-    print("  First 3 beats will show 'WAITING' status until buffer is full")
+
+    print("\nModel: Context-Aware CNN1D ")
 
     use_record_119 = not args.training_data
     use_training_data = args.training_data
@@ -292,7 +283,7 @@ def main():
     print("  Data: Using MIT-BIH record 119 (excluded from training - true validation)")
 
     print("Loading data and model...")
-    load_data(model_version='v6', use_training_data=use_training_data, use_record_119=use_record_119)
+    load_data(model_version='context_aware', use_training_data=use_training_data, use_record_119=use_record_119)
 
     print(f"\nStarting web server on port {args.port}...")
     print(f"Open your browser and go to: http://localhost:{args.port}")
