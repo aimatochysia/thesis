@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ECG Real-Time Classification</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha384-OLBgp1GsljhM2TJ+sbHjaiH9txEUvgdDTAzHv2P24donTt6/529l+9Ua0vFImLlb" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>ECG Real-Time Classification Monitor</h1>
+        <p style="text-align: center; color: #888; margin-bottom: 15px;">
+            Using PyTorch ONNX Model: <span id="modelName" class="model-badge">Loading...</span>
+        </p>
+
+        <div class="controls">
+            <button id="startBtn" onclick="startSimulation()">Start</button>
+            <button id="stopBtn" onclick="stopSimulation()">Stop</button>
+            <button id="resetBtn" onclick="resetSimulation()">Reset</button>
+            <div class="speed-control">
+                <span>Speed:</span>
+                <button class="speed-btn" onclick="setSpeed(0.1)">0.1x</button>
+                <button class="speed-btn" onclick="setSpeed(0.5)">0.5x</button>
+                <button class="speed-btn active" onclick="setSpeed(1)">1x</button>
+                <button class="speed-btn" onclick="setSpeed(5)">5x</button>
+                <button class="speed-btn" onclick="setSpeed(10)">10x</button>
+                <span id="speedValue">1x</span>
+            </div>
+        </div>
+
+        <div class="stats-bar">
+            <div class="stat-item">
+                <div class="stat-value" id="totalBeats">0</div>
+                <div class="stat-label">Total Beats</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="normalBeats" style="color: #00ff88;">0</div>
+                <div class="stat-label">Normal</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="abnormalBeats" style="color: #ff4757;">0</div>
+                <div class="stat-label">Abnormal</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="accuracy">--</div>
+                <div class="stat-label">Accuracy</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="heartRate">--</div>
+                <div class="stat-label">BPM</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="falseCount" style="color: #ffd700;">0</div>
+                <div class="stat-label">False Predictions</div>
+            </div>
+        </div>
+
+        <div class="ecg-container">
+            <canvas id="ecgCanvas"></canvas>
+            <div class="time-display">
+                Time: <span id="currentTime">0:00.000</span>
+                <span id="historyIndicator" class="history-indicator">VIEWING HISTORY</span>
+            </div>
+            <div style="display: flex; justify-content: center; gap: 10px; margin-top: 10px;">
+                <button class="nav-btn" onclick="scrollHistory(-5)">&lt;&lt; -5s</button>
+                <button class="nav-btn" onclick="scrollHistory(-1)">&lt; -1s</button>
+                <button id="liveBtn" class="live-btn" onclick="goToLive()">LIVE</button>
+                <button id="fwdBtn" class="nav-btn" onclick="scrollHistory(1)" disabled>&gt; +1s</button>
+                <button id="fwd5Btn" class="nav-btn" onclick="scrollHistory(5)" disabled>&gt;&gt; +5s</button>
+                <span style="margin: 0 10px; color: #444;">|</span>
+                <button class="download-btn" onclick="downloadAllBatches()" title="Download all batches as ZIP">Download Batches (ZIP)</button>
+            </div>
+            <div id="batchStatus" style="text-align: center; margin-top: 8px; font-size: 12px;">
+                <span style="color: #888;">Auto-saves every 2 min | Click button to download as ZIP</span>
+            </div>
+            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 5px;">Drag the graph to scroll through history | Batches auto-save, download ZIP when ready</p>
+        </div>
+
+        <!-- Beat Snapshot Panel -->
+        <div class="beat-snapshot-container">
+            <h3>Current Beat Snapshot (Input to ONNX Model)</h3>
+            <div style="display: flex; align-items: center; gap: 20px;">
+                <div style="flex: 1;">
+                    <canvas id="beatCanvas" style="width: 100%; height: 150px; background: #0a0a1a; border-radius: 10px;"></canvas>
+                </div>
+                <div style="min-width: 200px; text-align: center;">
+                    <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Beat Type (Annotation)</div>
+                    <div id="beatTypeDisplay" style="font-size: 24px; font-weight: bold; color: #00ff88;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Ground Truth</div>
+                    <div id="groundTruthDisplay" style="font-size: 18px; font-weight: bold; color: #00ff88;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Model Prediction</div>
+                    <div id="predictionDisplay" style="font-size: 18px; font-weight: bold; color: #00ff88;">--</div>
+                </div>
+            </div>
+            <div style="text-align: center; color: #666; font-size: 11px; margin-top: 10px;">
+                188 samples extracted around R-peak - Normalized with scaler - Fed to ONNX model - Output: 0=Normal, 1=Abnormal
+            </div>
+        </div>
+
+        <div class="results-container">
+            <div class="panel">
+                <h3>Current Classification</h3>
+                <div class="current-beat">
+                    <div class="label">Latest Heartbeat Status</div>
+                    <div class="value" id="currentStatus">Waiting...</div>
+                    <div class="probability-bar">
+                        <div class="probability-fill" id="probBar" style="width: 0%; background: #00ff88; display: none;"></div>
+                    </div>
+                    <div id="probText" style="margin-top: 10px; display: none; color: #888;">Abnormal Probability: --</div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>Classification History</h3>
+                <div class="classification-list" id="classificationList">
+                    <p style="color: #888; text-align: center;">No classifications yet. Start the simulation!</p>
+                </div>
+            </div>
+
+            <div class="panel false-detections-panel">
+                <h3>FALSE DETECTIONS</h3>
+                <div class="classification-list" id="falseDetectionList">
+                    <p style="color: #888; text-align: center;">No false detections yet.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

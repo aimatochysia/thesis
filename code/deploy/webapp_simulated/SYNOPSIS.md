@@ -1,0 +1,5 @@
+# CardioMonitor -- Synopsis
+
+CardioMonitor is a web application designed to monitor and classify ECG heartbeats in real time with the help of machine learning technology. The application utilizes a Context-Aware CNN1D model, exported to the ONNX format for efficient inference, to provide accurate classification results. Users simply start the monitoring session in their browser, and the application will visualize the ECG signal on an interactive canvas while analyzing each heartbeat as it arrives. If the classification indicates an abnormal heartbeat, CardioMonitor will immediately flag it with a visual indicator along with the probability score from the model, allowing users to identify potential cardiac irregularities earlier for better patient outcomes.
+
+The benefit of this application is that it helps healthcare professionals and researchers monitor cardiac rhythm continuously, detect abnormal heartbeats quickly, and review classification results in detail through features such as history navigation, beat snapshot visualization, and batch export of ECG strips for archival or further analysis.

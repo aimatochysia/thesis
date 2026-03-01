@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ECG Real-Input Classification</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>ECG Real-Input Classification</h1>
+        <p style="text-align: center; color: #888; margin-bottom: 15px;">
+            Built-in Pan-Tompkins R-peak Detection | Model: <span id="modelName" class="model-badge">Loading...</span>
+        </p>
+
+        <!-- Upload Section -->
+        <div class="upload-section">
+            <div class="upload-row">
+                <div class="upload-area" id="uploadArea">
+                    <div id="uploadPrompt">
+                        <div class="upload-icon">[CSV]</div>
+                        <div>Drag and drop a CSV file here, or click to browse</div>
+                        <div style="color: #666; font-size: 12px; margin-top: 5px;">Supported: CSV with numeric ECG column</div>
+                    </div>
+                    <div id="uploadStatus" style="display: none;">
+                        <div class="upload-filename" id="uploadFilename"></div>
+                        <div id="uploadInfo" style="color: #888; font-size: 12px;"></div>
+                    </div>
+                    <input type="file" id="fileInput" accept=".csv" style="display: none;">
+                </div>
+                <div class="upload-options">
+                    <div class="option-group">
+                        <label for="samplingRate">Sampling Rate (Hz)</label>
+                        <input type="number" id="samplingRate" value="360" min="1" max="10000">
+                    </div>
+                    <div class="option-group">
+                        <label for="ecgColumn">ECG Column (optional)</label>
+                        <input type="text" id="ecgColumn" placeholder="Auto-detect">
+                    </div>
+                    <button id="processBtn" onclick="processECG()" disabled>Process ECG</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats Bar -->
+        <div class="stats-bar" id="statsBar" style="display: none;">
+            <div class="stat-item">
+                <div class="stat-value" id="totalBeats">0</div>
+                <div class="stat-label">Total Beats</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="normalBeats" style="color: #00ff88;">0</div>
+                <div class="stat-label">Normal</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="abnormalBeats" style="color: #ff4757;">0</div>
+                <div class="stat-label">Abnormal</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="normalPct">--</div>
+                <div class="stat-label">Normal %</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="avgHR">--</div>
+                <div class="stat-label">Avg BPM</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="duration">--</div>
+                <div class="stat-label">Duration (s)</div>
+            </div>
+        </div>
+
+        <!-- Processing indicator -->
+        <div id="processingIndicator" style="display: none; text-align: center; padding: 30px;">
+            <div style="color: #00ff88; font-size: 18px;">Processing ECG signal...</div>
+            <div style="color: #888; font-size: 13px; margin-top: 8px;">Running bandpass filter, R-peak detection, and beat classification</div>
+        </div>
+
+        <!-- ECG Canvas -->
+        <div class="ecg-container" id="ecgSection" style="display: none;">
+            <canvas id="ecgCanvas"></canvas>
+            <div class="time-display">
+                <span id="currentTimeRange">0:00 - 0:05</span>
+            </div>
+            <div style="display: flex; justify-content: center; gap: 10px; margin-top: 10px;">
+                <button class="nav-btn" onclick="scrollView(-5)">&lt;&lt; -5s</button>
+                <button class="nav-btn" onclick="scrollView(-1)">&lt; -1s</button>
+                <button class="nav-btn" onclick="scrollView(1)">&gt; +1s</button>
+                <button class="nav-btn" onclick="scrollView(5)">&gt;&gt; +5s</button>
+                <span style="margin: 0 10px; color: #444;">|</span>
+                <button class="download-btn" onclick="exportECG('png')">Export PNG</button>
+                <button class="download-btn" onclick="exportECG('jpeg')">Export JPEG</button>
+            </div>
+            <p style="text-align: center; color: #666; font-size: 11px; margin-top: 5px;">
+                Drag the graph to scroll | Click on R-peak markers to view beat details
+            </p>
+        </div>
+
+        <!-- Beat Snapshot Panel -->
+        <div class="beat-snapshot-container" id="beatSection" style="display: none;">
+            <h3>Beat Snapshot (Input to ONNX Model)</h3>
+            <div style="display: flex; align-items: center; gap: 20px;">
+                <div style="flex: 1;">
+                    <canvas id="beatCanvas" style="width: 100%; height: 150px; background: #0a0a1a; border-radius: 10px;"></canvas>
+                </div>
+                <div style="min-width: 200px; text-align: center;">
+                    <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Beat Index</div>
+                    <div id="beatIndexDisplay" style="font-size: 24px; font-weight: bold; color: #00ff88;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Time</div>
+                    <div id="beatTimeDisplay" style="font-size: 18px; font-weight: bold; color: #ccc;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Model Prediction</div>
+                    <div id="predictionDisplay" style="font-size: 18px; font-weight: bold; color: #00ff88;">--</div>
+                    <div style="color: #888; font-size: 12px; margin-top: 10px;">Abnormal Probability</div>
+                    <div id="probDisplay" style="font-size: 18px; font-weight: bold; color: #ccc;">--</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results -->
+        <div class="results-container" id="resultsSection" style="display: none;">
+            <div class="panel">
+                <h3>Classification Summary</h3>
+                <div class="current-beat">
+                    <div class="probability-bar">
+                        <div class="probability-fill" id="summaryBar" style="width: 0%; background: #00ff88;"></div>
+                    </div>
+                    <div id="summaryText" style="margin-top: 10px; color: #888; font-size: 14px;">
+                        Upload and process an ECG file to see results
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>Classification Results</h3>
+                <div class="classification-list" id="classificationList">
+                    <p style="color: #888; text-align: center;">No classifications yet. Upload a CSV file and click Process.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
