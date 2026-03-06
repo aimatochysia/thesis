@@ -2,7 +2,7 @@ from pypdf import PdfReader, PdfWriter
 import os
 
 # ===== CONFIG =====
-input_pdf_path = "./docs/Final-Skripsi-revisi-1.pdf"   # change to your file
+input_pdf_path = "./docs/Final-Skripsi-revisi-2.pdf"   # change to your file
 output_folder = "FINAL_REPORT"
 
 sections = [
